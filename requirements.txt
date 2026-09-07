@@ -1,0 +1,8 @@
+# Core app uses only the Python standard library.
+# Install optional packages as needed:
+#   pip install -e ".[live,analytics,ml,dev]"
+#
+# live: Playwright CDP monitor for AE SEXY
+# analytics: DuckDB mirror for heavier reporting
+# ml: pandas + scikit-learn + XGBoost offline training
+# dev: pytest

@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.spec
+# All files under data/ are local runtime artifacts. This includes live game
+# history, analytics databases, ML outputs, WAL/SHM files, and backups.
+data/
+logs/
+config.local.json
+chrome-cdp-profile/
+workbench.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.egg-info/

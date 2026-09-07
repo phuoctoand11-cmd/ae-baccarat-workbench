@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">AE Baccarat Workbench - Sơ đồ vận hành</title>
+  <desc id="desc">Sơ đồ tư duy mô tả luồng dữ liệu từ Chrome CDP, lưu trữ, engine, paper trading, analytics DuckDB và machine learning offline.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f6f7f9; }
+      .title { font: 700 34px "Segoe UI", Arial, sans-serif; fill: #101828; }
+      .subtitle { font: 500 16px "Segoe UI", Arial, sans-serif; fill: #475467; }
+      .hub { fill: #111827; stroke: #111827; stroke-width: 2; }
+      .hub-text { font: 700 26px "Segoe UI", Arial, sans-serif; fill: #ffffff; text-anchor: middle; }
+      .hub-sub { font: 500 15px "Segoe UI", Arial, sans-serif; fill: #d1d5db; text-anchor: middle; }
+      .node-title { font: 700 18px "Segoe UI", Arial, sans-serif; fill: #101828; }
+      .node-line { font: 500 14px "Segoe UI", Arial, sans-serif; fill: #344054; }
+      .small { font: 600 13px "Segoe UI", Arial, sans-serif; fill: #475467; }
+      .box { stroke-width: 2; rx: 12; ry: 12; }
+      .connector { fill: none; stroke: #98a2b3; stroke-width: 3; stroke-linecap: round; }
+      .arrow { fill: #98a2b3; }
+      .safe { fill: #fff7ed; stroke: #f97316; }
+      .source { fill: #eef6ff; stroke: #2e90fa; }
+      .store { fill: #ecfdf3; stroke: #12b76a; }
+      .engine { fill: #fef3f2; stroke: #f04438; }
+      .strategy { fill: #f4f3ff; stroke: #7a5af8; }
+      .paper { fill: #fffbe6; stroke: #eaaa08; }
+      .dashboard { fill: #f0f9ff; stroke: #06aed4; }
+      .analytics { fill: #f8f9fc; stroke: #667085; }
+      .ml { fill: #fdf2fa; stroke: #ee46bc; }
+      .decision { fill: #f2f4f7; stroke: #344054; }
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path class="arrow" d="M2,2 L10,6 L2,10 Z" />
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1600" height="1000" />
+  <text class="title" x="80" y="70">AE Baccarat Workbench - Sơ đồ vận hành</text>
+  <text class="subtitle" x="80" y="100">Đọc dữ liệu thật → lưu lịch sử → kiểm chứng paper trading → tạo rolling features → train ML offline → lọc signal</text>
+
+  <path class="connector" marker-end="url(#arrow)" d="M575 270 C460 235 360 225 260 230" />
+  <path class="connector" marker-end="url(#arrow)" d="M595 350 C485 360 405 395 325 455" />
+  <path class="connector" marker-end="url(#arrow)" d="M690 415 C615 510 570 600 525 715" />
+  <path class="connector" marker-end="url(#arrow)" d="M800 420 C800 505 800 610 800 715" />
+  <path class="connector" marker-end="url(#arrow)" d="M910 415 C985 510 1030 600 1075 715" />
+  <path class="connector" marker-end="url(#arrow)" d="M1005 350 C1115 360 1195 395 1275 455" />
+  <path class="connector" marker-end="url(#arrow)" d="M1025 270 C1140 235 1240 225 1340 230" />
+  <path class="connector" marker-end="url(#arrow)" d="M800 230 C800 185 800 160 800 135" />
+
+  <rect class="hub" x="585" y="230" width="430" height="190" rx="22" ry="22" />
+  <text class="hub-text" x="800" y="295">AE Baccarat</text>
+  <text class="hub-text" x="800" y="330">Workbench</text>
+  <text class="hub-sub" x="800" y="370">Passive live monitor + analytics + ML</text>
+
+  <g>
+    <rect class="box source" x="80" y="160" width="360" height="170" />
+    <text class="node-title" x="105" y="198">1. Nguồn dữ liệu</text>
+    <text class="node-line" x="105" y="232">Chrome CDP: WebSocket, XHR/Fetch, DOM</text>
+    <text class="node-line" x="105" y="258">Nhập tay chuỗi B/P/T để test nhanh</text>
+    <text class="node-line" x="105" y="284">Dữ liệu đã lưu: SQLite + DuckDB</text>
+  </g>
+
+  <g>
+    <rect class="box safe" x="590" y="35" width="420" height="100" />
+    <text class="node-title" x="615" y="73">Ranh giới an toàn</text>
+    <text class="node-line" x="615" y="101">Chỉ đọc dữ liệu người dùng đang xem</text>
+    <text class="node-line" x="615" y="124">Không auto-bet, không credential, không bypass</text>
+  </g>
+
+  <g>
+    <rect class="box store" x="1160" y="160" width="360" height="185" />
+    <text class="node-title" x="1185" y="198">2. Lưu dữ liệu</text>
+    <text class="node-line" x="1185" y="232">SQLite là kho chính: rounds, signals</text>
+    <text class="node-line" x="1185" y="258">paper_bets, tables</text>
+    <text class="node-line" x="1185" y="284">DuckDB mirror để analytics offline</text>
+    <text class="node-line" x="1185" y="310">Backfill từ SQLite khi mở app</text>
+  </g>
+
+  <g>
+    <rect class="box engine" x="80" y="395" width="405" height="190" />
+    <text class="node-title" x="105" y="433">3. Engine xử lý</text>
+    <text class="node-line" x="105" y="467">Gộp snapshot theo từng bàn</text>
+    <text class="node-line" x="105" y="493">Chống trùng round bằng fingerprint</text>
+    <text class="node-line" x="105" y="519">Cập nhật vị trí shoe bằng round_no</text>
+    <text class="node-line" x="105" y="545">Ngắt signal khi gần cuối shoe</text>
+  </g>
+
+  <g>
+    <rect class="box strategy" x="1115" y="395" width="405" height="210" />
+    <text class="node-title" x="1140" y="433">4. Chiến lược dự đoán</text>
+    <text class="node-line" x="1140" y="467">CSSS/SCCC</text>
+    <text class="node-line" x="1140" y="493">Run length</text>
+    <text class="node-line" x="1140" y="519">Shoe profile</text>
+    <text class="node-line" x="1140" y="545">Sequence follow</text>
+    <text class="node-line" x="1140" y="571">Ensemble majority</text>
+  </g>
+
+  <g>
+    <rect class="box paper" x="220" y="700" width="390" height="190" />
+    <text class="node-title" x="245" y="738">5. Paper trading</text>
+    <text class="node-line" x="245" y="772">Chỉ cược ảo, không đặt chip thật</text>
+    <text class="node-line" x="245" y="798">Signal tạo pending bet</text>
+    <text class="node-line" x="245" y="824">Ván sau settle win/loss/push</text>
+    <text class="node-line" x="245" y="850">Lưu P&amp;L và lịch sử từng mô hình</text>
+  </g>
+
+  <g>
+    <rect class="box dashboard" x="605" y="700" width="390" height="210" />
+    <text class="node-title" x="630" y="738">6. Dashboard theo dõi</text>
+    <text class="node-line" x="630" y="772">Nhiều bàn: ván hiện tại / đã lưu</text>
+    <text class="node-line" x="630" y="798">Tín hiệu tốt nhất từng bàn</text>
+    <text class="node-line" x="630" y="824">W/L gần, chuỗi gần, chuỗi hiện tại</text>
+    <text class="node-line" x="630" y="850">Paper P&amp;L và trạng thái live</text>
+  </g>
+
+  <g>
+    <rect class="box analytics" x="990" y="700" width="390" height="210" />
+    <text class="node-title" x="1015" y="738">7. DuckDB analytics</text>
+    <text class="node-line" x="1015" y="772">round_streaks</text>
+    <text class="node-line" x="1015" y="798">paper_bet_results, paper_wl_streaks</text>
+    <text class="node-line" x="1015" y="824">strategy_performance, table_round_summary</text>
+    <text class="node-line" x="1015" y="850">ml_rolling_features cho ML sạch</text>
+  </g>
+
+  <path class="connector" marker-end="url(#arrow)" d="M1175 700 C1085 640 965 600 850 540" />
+  <path class="connector" marker-end="url(#arrow)" d="M415 700 C485 635 585 590 735 535" />
+  <path class="connector" marker-end="url(#arrow)" d="M800 700 C800 620 800 555 800 455" />
+
+  <g>
+    <rect class="box ml" x="545" y="500" width="510" height="140" />
+    <text class="node-title" x="570" y="538">8. Machine Learning offline</text>
+    <text class="node-line" x="570" y="572">Train scikit-learn + XGBoost từ rolling features</text>
+    <text class="node-line" x="570" y="598">Không dùng dữ liệu tương lai, không bịa dữ liệu thiếu</text>
+    <text class="node-line" x="570" y="624">Đo accuracy, precision, recall, F1, ROC-AUC</text>
+  </g>
+
+  <path class="connector" marker-end="url(#arrow)" d="M1055 570 C1130 610 1175 655 1185 700" />
+  <path class="connector" marker-end="url(#arrow)" d="M545 570 C475 610 430 655 415 700" />
+
+  <g>
+    <rect class="box decision" x="485" y="925" width="630" height="55" />
+    <text class="small" x="510" y="958">Sau này: strategy gốc phát signal → ML lọc xác suất → đủ ngưỡng thì giữ, không đủ thì bỏ qua</text>
+  </g>
+</svg>
