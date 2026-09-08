@@ -16,9 +16,12 @@ from ae_baccarat_workbench.app import (
     _parse_live_table_stale_seconds,
     _rank_daily_candidates,
     _snapshot_queue_key,
+    _select_stable_pair_signal,
+    _stable_pair_summary_label,
     _wl_streak,
 )
 from ae_baccarat_workbench.ae_decode import parse_manual_sequence
+from ae_baccarat_workbench.models import BetSide, StrategyAction, StrategySignal
 
 
 class AppHelperTests(unittest.TestCase):
@@ -148,6 +151,75 @@ class AppHelperTests(unittest.TestCase):
         self.assertEqual(
             label,
             "Hiển thị 8/8 lệnh | W 4 - L 2 - T 1 | Đang chờ 1 | P&L +15.50",
+        )
+
+    def test_stable_pair_selects_best_ml_pass_before_applying_pair_rule(self) -> None:
+        snapshot = parse_manual_sequence("B P P B", "Baccarat C09")
+        fingerprint = snapshot.latest_fingerprint()
+        allowed_lower = StrategySignal(
+            table_name="Baccarat C09",
+            strategy_id="shoe_profile",
+            action=StrategyAction.BET,
+            side=BetSide.BANKER,
+            confidence=0.58,
+            reason="ML pass",
+            round_fingerprint=fingerprint,
+            features={"ml_probability_win": 0.58},
+        )
+        disallowed_higher = StrategySignal(
+            table_name="Baccarat C09",
+            strategy_id="run_length",
+            action=StrategyAction.BET,
+            side=BetSide.PLAYER,
+            confidence=0.59,
+            reason="ML pass",
+            round_fingerprint=fingerprint,
+            features={"ml_probability_win": 0.59},
+        )
+
+        self.assertIsNone(
+            _select_stable_pair_signal([allowed_lower, disallowed_higher], snapshot)
+        )
+        self.assertIs(
+            _select_stable_pair_signal([allowed_lower], snapshot),
+            allowed_lower,
+        )
+
+    def test_stable_pair_probability_band_is_lower_inclusive_upper_exclusive(self) -> None:
+        snapshot = parse_manual_sequence("B P P B", "Baccarat C09")
+
+        def signal(probability: float) -> StrategySignal:
+            return StrategySignal(
+                table_name="Baccarat C09",
+                strategy_id="shoe_profile",
+                action=StrategyAction.BET,
+                side=BetSide.BANKER,
+                confidence=probability,
+                reason="ML pass",
+                round_fingerprint=snapshot.latest_fingerprint(),
+                features={"ml_probability_win": probability},
+            )
+
+        self.assertIsNotNone(_select_stable_pair_signal([signal(0.55)], snapshot))
+        self.assertIsNotNone(_select_stable_pair_signal([signal(0.5999)], snapshot))
+        self.assertIsNone(_select_stable_pair_signal([signal(0.60)], snapshot))
+
+    def test_stable_pair_summary_reports_decisive_win_rate(self) -> None:
+        label = _stable_pair_summary_label(
+            {
+                "total_count": 8,
+                "pending_count": 1,
+                "win_count": 4,
+                "loss_count": 2,
+                "tie_count": 1,
+                "total_pnl": 1.8,
+            },
+            displayed_count=8,
+        )
+        self.assertEqual(
+            label,
+            "Hiển thị 8/8 lệnh | W 4 - L 2 - T 1 | Win rate 66.67% | "
+            "Đang chờ 1 | P&L +1.80 unit",
         )
 
 

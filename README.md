@@ -166,10 +166,26 @@ per local day, even if it qualifies again in a later session.
 
 The experiment is independent from the normal `paper_bets` ledger. It stores
 the actual source strategy, ML probability, stake, signal fingerprint, result,
-and P&L in `daily_experiment_bets`. Settlement uses the first stored physical
-round after the signal fingerprint, so a pending experiment can still settle
-after an app restart. This feature is paper-only and never clicks or places a
-real bet in the browser.
+and P&L in `daily_experiment_bets`. Settlement accepts only the exact next
+round in the same shoe, so a pending experiment can still settle safely after
+an app restart. This feature is paper-only and never clicks or places a real
+bet in the browser.
+
+## Stable Pair 55–60 forward test
+
+The `Stable 55–60` tab keeps the `stable_pair_55_60` experiment isolated from
+normal paper trading and the time-window experiment. For every fresh round it
+first selects the single highest-probability ML Pass. It records that signal
+only when its probability is `0.55 <= p < 0.60` and its exact table/strategy
+pair is in the fixed allowlist shown in the tab.
+
+Each record uses a flat stake of `1` unit. Banker wins apply the configured
+commission, Player wins return `+1`, and Tie is a push. The SQLite table
+`stable_pair_bets` allows one pending record per table, rejects duplicate
+`table_name + signal_fingerprint` records, and settles only against the exact
+next round in the same shoe. Pending records are cached in memory while the app
+runs, history refreshes only after the ledger changes, and this experiment is
+not mirrored to DuckDB in the live path.
 
 ## Passive latency monitor
 

@@ -34,6 +34,20 @@ DAILY_EXPERIMENT_WINDOWS = (
 DAILY_EXPERIMENT_MAX_PER_WINDOW = 2
 DAILY_HISTORY_ALL = "Tất cả"
 DAILY_HISTORY_ROW_LIMIT = 250
+STABLE_PAIR_RULES = frozenset(
+    {
+        ("Baccarat C09", "shoe_profile"),
+        ("Baccarat C05", "ensemble_majority"),
+        ("Baccarat C11", "sequence_follow"),
+        ("Baccarat C15", "sequence_follow"),
+        ("Baccarat C07", "ensemble_majority"),
+        ("Baccarat C01", "shoe_profile"),
+    }
+)
+STABLE_PAIR_MIN_PROBABILITY = 0.55
+STABLE_PAIR_MAX_PROBABILITY = 0.60
+STABLE_PAIR_STAKE = 1.0
+STABLE_PAIR_ROW_LIMIT = 250
 
 
 class BaccaratWorkbenchApp:
@@ -71,6 +85,10 @@ class BaccaratWorkbenchApp:
         self._queued_snapshot_payloads: dict[str, dict[str, Any]] = {}
         self._queued_snapshot_lock = threading.Lock()
         self._last_views_refresh_monotonic = 0.0
+        self._stable_pending_by_table: dict[str, Any] = {
+            str(row["table_name"]): row for row in self.store.pending_stable_pair_rows()
+        }
+        self._stable_pair_dirty = True
 
         self._build_ui()
         analytics_status = self.store.analytics_status()
@@ -101,6 +119,7 @@ class BaccaratWorkbenchApp:
         self.signals_tab = ttk.Frame(notebook, padding=12)
         self.latency_tab = ttk.Frame(notebook, padding=12)
         self.daily_tab = ttk.Frame(notebook, padding=12)
+        self.stable_pair_tab = ttk.Frame(notebook, padding=12)
         self.config_tab = ttk.Frame(notebook, padding=12)
 
         notebook.add(self.live_tab, text="Live Monitor")
@@ -109,6 +128,7 @@ class BaccaratWorkbenchApp:
         notebook.add(self.signals_tab, text="Signal + Paper")
         notebook.add(self.latency_tab, text="Latency")
         notebook.add(self.daily_tab, text="Paper theo khung giờ")
+        notebook.add(self.stable_pair_tab, text="Stable 55–60")
         notebook.add(self.config_tab, text="Cấu hình")
 
         self.status_var = tk.StringVar(value="")
@@ -121,6 +141,7 @@ class BaccaratWorkbenchApp:
         self._build_signals_tab()
         self._build_latency_tab()
         self._build_daily_tab()
+        self._build_stable_pair_tab()
         self._build_config_tab()
 
     def _build_live_tab(self) -> None:
@@ -743,6 +764,96 @@ class BaccaratWorkbenchApp:
             "<<ComboboxSelected>>", lambda _event: self._refresh_daily_history(force=True)
         )
 
+    def _build_stable_pair_tab(self) -> None:
+        self.stable_pair_tab.columnconfigure(0, weight=1)
+        self.stable_pair_tab.rowconfigure(3, weight=1)
+
+        header = ttk.Frame(self.stable_pair_tab)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(
+            header,
+            text="Forward test stable_pair_55_60 — flat 1 unit, chỉ paper",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            header,
+            text="Làm mới",
+            command=lambda: self._refresh_stable_pair_tab(force=True),
+        ).grid(row=0, column=1, sticky="e")
+        header.columnconfigure(0, weight=1)
+
+        pair_text = " | ".join(
+            f"{table.replace('Baccarat ', '')}: {strategy}"
+            for table, strategy in sorted(STABLE_PAIR_RULES)
+        )
+        ttk.Label(
+            self.stable_pair_tab,
+            text=f"Luật: chọn ML Pass tốt nhất trước; 55% ≤ ML < 60% | {pair_text}",
+            anchor="w",
+            wraplength=1100,
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        self.stable_pair_summary_var = tk.StringVar(value="Đang tải ledger...")
+        ttk.Label(
+            self.stable_pair_tab,
+            textvariable=self.stable_pair_summary_var,
+            anchor="w",
+        ).grid(row=2, column=0, sticky="ew", pady=(0, 8))
+
+        columns = (
+            "created",
+            "settled",
+            "table",
+            "strategy",
+            "side",
+            "confidence",
+            "round",
+            "result",
+            "pnl",
+            "status",
+        )
+        headings = {
+            "created": "Ghi lúc",
+            "settled": "Settle lúc",
+            "table": "Bàn",
+            "strategy": "Chiến lược",
+            "side": "Cửa",
+            "confidence": "ML %",
+            "round": "Round",
+            "result": "W/L/T",
+            "pnl": "P&L unit",
+            "status": "Trạng thái",
+        }
+        widths = {
+            "created": 155,
+            "settled": 155,
+            "table": 115,
+            "strategy": 135,
+            "side": 60,
+            "confidence": 65,
+            "round": 55,
+            "result": 55,
+            "pnl": 75,
+            "status": 95,
+        }
+        self.stable_pair_tree = ttk.Treeview(
+            self.stable_pair_tab,
+            columns=columns,
+            show="headings",
+            height=22,
+        )
+        for col in columns:
+            self.stable_pair_tree.heading(col, text=headings[col])
+            self.stable_pair_tree.column(col, width=widths[col], anchor="w")
+        self.stable_pair_tree.grid(row=3, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(
+            self.stable_pair_tab,
+            orient="vertical",
+            command=self.stable_pair_tree.yview,
+        )
+        scrollbar.grid(row=3, column=1, sticky="ns")
+        self.stable_pair_tree.configure(yscrollcommand=scrollbar.set)
+        self._refresh_stable_pair_tab(force=True)
+
     def _build_config_tab(self) -> None:
         self.config_tab.columnconfigure(1, weight=1)
 
@@ -1022,8 +1133,10 @@ class BaccaratWorkbenchApp:
             self._set_status(f"Lỗi xử lý snapshot: {exc}")
             return
         self._settle_daily_experiment(snapshot.table_name)
+        self._settle_stable_pair(snapshot.table_name)
         if not stale_snapshot:
             self._auto_arm_daily_experiment()
+            self._auto_arm_stable_pair(snapshot, signals)
         engine_done_monotonic = time.perf_counter()
         engine_done_at = utc_now_iso_ms()
         actionable = [s for s in signals if s.is_actionable]
@@ -1102,6 +1215,7 @@ class BaccaratWorkbenchApp:
         self._refresh_paper_tree()
         self._refresh_latency_tree()
         self._refresh_daily_tab()
+        self._refresh_stable_pair_tab()
 
     def _refresh_dashboard_tree(self) -> None:
         self.dashboard_tree.delete(*self.dashboard_tree.get_children())
@@ -1472,6 +1586,96 @@ class BaccaratWorkbenchApp:
         if settled:
             self._daily_history_dirty = True
 
+    def _auto_arm_stable_pair(
+        self,
+        snapshot: TableSnapshot,
+        signals: list[StrategySignal],
+    ) -> None:
+        if snapshot.table_name in self._stable_pending_by_table:
+            return
+        signal = _select_stable_pair_signal(signals, snapshot)
+        if signal is None or signal.side is None:
+            return
+        probability = float(signal.features["ml_probability_win"])
+        bet_id = self.store.save_stable_pair_bet(
+            created_at=utc_now_iso_ms(),
+            table_name=snapshot.table_name,
+            strategy_id=signal.strategy_id,
+            side=signal.side.value,
+            stake=STABLE_PAIR_STAKE,
+            signal_fingerprint=signal.round_fingerprint,
+            confidence=probability,
+        )
+        if bet_id is not None:
+            self._stable_pending_by_table[snapshot.table_name] = {
+                "id": bet_id,
+                "table_name": snapshot.table_name,
+                "side": signal.side.value,
+                "stake": STABLE_PAIR_STAKE,
+                "signal_fingerprint": signal.round_fingerprint,
+            }
+            self._stable_pair_dirty = True
+
+    def _settle_stable_pair(self, table_name: str) -> None:
+        row = self._stable_pending_by_table.get(table_name)
+        if row is None:
+            return
+        result_event = self.store.next_round_after_fingerprint(
+            table_name=table_name,
+            signal_fingerprint=str(row["signal_fingerprint"]),
+        )
+        if result_event is None:
+            return
+        outcome = str(result_event["outcome"])
+        result, pnl = _daily_experiment_result(
+            str(row["side"]),
+            outcome,
+            float(row["stake"]),
+            self.config.money.banker_commission,
+        )
+        settled = self.store.settle_stable_pair_bet(
+            bet_id=int(row["id"]),
+            settled_at=str(result_event["observed_at"]),
+            outcome=outcome,
+            result=result,
+            pnl=pnl,
+        )
+        if settled:
+            self._stable_pending_by_table.pop(table_name, None)
+            self._stable_pair_dirty = True
+
+    def _refresh_stable_pair_tab(self, *, force: bool = False) -> None:
+        if not force and not self._stable_pair_dirty:
+            return
+        try:
+            rows = self.store.stable_pair_rows(limit=STABLE_PAIR_ROW_LIMIT)
+            summary = self.store.stable_pair_summary()
+        except Exception as exc:
+            self.stable_pair_summary_var.set(f"Không tải được stable ledger: {exc}")
+            return
+
+        self.stable_pair_tree.delete(*self.stable_pair_tree.get_children())
+        for row in rows:
+            settled = str(row["status"]) == "settled"
+            self.stable_pair_tree.insert(
+                "",
+                "end",
+                values=(
+                    row["created_at"],
+                    row["settled_at"] or "-",
+                    row["table_name"],
+                    row["strategy_id"],
+                    _daily_side_label(str(row["side"])),
+                    f"{float(row['confidence']):.1%}",
+                    _daily_round_label(str(row["signal_fingerprint"])),
+                    row["result"] or "-",
+                    f"{float(row['pnl'] or 0):+.2f}" if settled else "-",
+                    "Đã settle" if settled else "Đang chờ",
+                ),
+            )
+        self.stable_pair_summary_var.set(_stable_pair_summary_label(summary, len(rows)))
+        self._stable_pair_dirty = False
+
     def _refresh_x3_sim_tree(self) -> None:
         if not hasattr(self, "x3_summary_tree"):
             return
@@ -1798,6 +2002,35 @@ def _rank_daily_candidates(scores: list[Any], snapshots: dict[str, TableSnapshot
     return candidates
 
 
+def _select_stable_pair_signal(
+    signals: list[StrategySignal],
+    snapshot: TableSnapshot,
+) -> StrategySignal | None:
+    """Select the round's best ML Pass first, then apply the stable-pair rule."""
+    current_fingerprint = snapshot.latest_fingerprint()
+    candidates: list[tuple[int, StrategySignal, float]] = []
+    for index, signal in enumerate(signals):
+        probability = _ml_probability(signal)
+        if (
+            signal.table_name == snapshot.table_name
+            and signal.is_actionable
+            and signal.round_fingerprint == current_fingerprint
+            and probability is not None
+        ):
+            candidates.append((index, signal, probability))
+    if not candidates:
+        return None
+    _index, best, probability = max(
+        candidates,
+        key=lambda item: (item[2], item[1].confidence, item[0]),
+    )
+    if (best.table_name, best.strategy_id) not in STABLE_PAIR_RULES:
+        return None
+    if not STABLE_PAIR_MIN_PROBABILITY <= probability < STABLE_PAIR_MAX_PROBABILITY:
+        return None
+    return best
+
+
 def _daily_experiment_result(
     side: str,
     outcome: str,
@@ -1824,6 +2057,23 @@ def _daily_history_summary_label(
         f"T {int(summary.get('tie_count', 0) or 0)} | "
         f"Đang chờ {int(summary.get('pending_count', 0) or 0)} | "
         f"P&L {float(summary.get('total_pnl', 0) or 0):+.2f}"
+    )
+
+
+def _stable_pair_summary_label(
+    summary: dict[str, int | float],
+    displayed_count: int,
+) -> str:
+    wins = int(summary.get("win_count", 0) or 0)
+    losses = int(summary.get("loss_count", 0) or 0)
+    decisive = wins + losses
+    win_rate = wins / decisive if decisive else 0.0
+    rate_label = f"{win_rate:.2%}" if decisive else "-"
+    return (
+        f"Hiển thị {displayed_count}/{int(summary.get('total_count', 0) or 0)} lệnh | "
+        f"W {wins} - L {losses} - T {int(summary.get('tie_count', 0) or 0)} | "
+        f"Win rate {rate_label} | Đang chờ {int(summary.get('pending_count', 0) or 0)} | "
+        f"P&L {float(summary.get('total_pnl', 0) or 0):+.2f} unit"
     )
 
 

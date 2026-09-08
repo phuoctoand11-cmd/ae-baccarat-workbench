@@ -488,6 +488,120 @@ class SqliteStorageTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_stable_pair_ledger_arms_once_and_settles_exact_next_round(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkbenchStore(Path(tmp) / "workbench.sqlite", enable_duckdb=False)
+            try:
+                signal_round = RoundEvent(
+                    "Baccarat C09",
+                    Outcome.PLAYER,
+                    table_id=1009,
+                    shoe="shoe-55",
+                    round_no=10,
+                    observed_at="2026-09-08T05:00:00+00:00",
+                )
+                result_round = RoundEvent(
+                    "Baccarat C09",
+                    Outcome.BANKER,
+                    table_id=1009,
+                    shoe="shoe-55",
+                    round_no=11,
+                    observed_at="2026-09-08T05:00:30+00:00",
+                )
+                store.upsert_rounds([signal_round])
+                pending_id = store.save_stable_pair_bet(
+                    created_at="2026-09-08T05:00:01+00:00",
+                    table_name="Baccarat C09",
+                    strategy_id="shoe_profile",
+                    side="B",
+                    stake=1,
+                    signal_fingerprint=signal_round.fingerprint,
+                    confidence=0.58,
+                )
+                self.assertIsNotNone(pending_id)
+                self.assertIsNone(
+                    store.save_stable_pair_bet(
+                        created_at="2026-09-08T05:00:02+00:00",
+                        table_name="Baccarat C09",
+                        strategy_id="shoe_profile",
+                        side="B",
+                        stake=1,
+                        signal_fingerprint="Baccarat C09|shoe-55|10|duplicate",
+                        confidence=0.58,
+                    )
+                )
+                self.assertEqual(len(store.pending_stable_pair_rows()), 1)
+
+                store.upsert_rounds([result_round])
+                next_round = store.next_round_after_fingerprint(
+                    table_name="Baccarat C09",
+                    signal_fingerprint=signal_round.fingerprint,
+                )
+                self.assertIsNotNone(next_round)
+                self.assertTrue(
+                    store.settle_stable_pair_bet(
+                        bet_id=int(pending_id),
+                        settled_at=str(next_round["observed_at"]),
+                        outcome=str(next_round["outcome"]),
+                        result="W",
+                        pnl=0.95,
+                    )
+                )
+                self.assertEqual(store.pending_stable_pair_rows(), [])
+                rows = store.stable_pair_rows()
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["status"], "settled")
+                self.assertEqual(rows[0]["pnl"], 0.95)
+                self.assertEqual(
+                    store.stable_pair_summary(),
+                    {
+                        "total_count": 1,
+                        "settled_count": 1,
+                        "pending_count": 0,
+                        "win_count": 1,
+                        "loss_count": 0,
+                        "tie_count": 0,
+                        "total_pnl": 0.95,
+                    },
+                )
+            finally:
+                store.close()
+
+    def test_stable_pair_rejects_signal_if_exact_next_round_already_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkbenchStore(Path(tmp) / "workbench.sqlite", enable_duckdb=False)
+            try:
+                signal_round = RoundEvent(
+                    "Baccarat C05",
+                    Outcome.BANKER,
+                    table_id=1005,
+                    shoe="shoe-60",
+                    round_no=20,
+                )
+                next_round = RoundEvent(
+                    "Baccarat C05",
+                    Outcome.PLAYER,
+                    table_id=1005,
+                    shoe="shoe-60",
+                    round_no=21,
+                )
+                store.upsert_rounds([signal_round, next_round])
+
+                self.assertIsNone(
+                    store.save_stable_pair_bet(
+                        created_at="2026-09-08T06:00:00+00:00",
+                        table_name="Baccarat C05",
+                        strategy_id="ensemble_majority",
+                        side="P",
+                        stake=1,
+                        signal_fingerprint=signal_round.fingerprint,
+                        confidence=0.57,
+                    )
+                )
+                self.assertEqual(store.stable_pair_rows(), [])
+            finally:
+                store.close()
+
     def test_daily_experiment_schema_migrates_existing_database(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             sqlite_path = Path(tmp) / "workbench.sqlite"

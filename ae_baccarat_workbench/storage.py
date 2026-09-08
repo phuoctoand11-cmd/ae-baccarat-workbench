@@ -462,6 +462,23 @@ class WorkbenchStore:
               UNIQUE(session_date, table_name)
             );
 
+            CREATE TABLE IF NOT EXISTS stable_pair_bets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              created_at TEXT NOT NULL,
+              settled_at TEXT,
+              table_name TEXT NOT NULL,
+              strategy_id TEXT NOT NULL,
+              side TEXT NOT NULL,
+              stake REAL NOT NULL DEFAULT 1,
+              signal_fingerprint TEXT NOT NULL,
+              status TEXT NOT NULL,
+              outcome TEXT,
+              result TEXT,
+              pnl REAL NOT NULL DEFAULT 0,
+              confidence REAL NOT NULL,
+              UNIQUE(table_name, signal_fingerprint)
+            );
+
             CREATE TABLE IF NOT EXISTS latency_samples (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               created_at TEXT NOT NULL,
@@ -499,6 +516,10 @@ class WorkbenchStore:
               ON paper_bets(table_name, status, reason, settled_at, created_at, id);
             CREATE INDEX IF NOT EXISTS idx_latency_table_time
               ON latency_samples(table_name, created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_stable_pair_status_table
+              ON stable_pair_bets(status, table_name, id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_stable_pair_one_pending_table
+              ON stable_pair_bets(table_name) WHERE status = 'pending';
             CREATE INDEX IF NOT EXISTS idx_data_quality_exclusions_time
               ON data_quality_exclusions(started_at, ended_at, scope);
             """
@@ -685,6 +706,112 @@ class WorkbenchStore:
                 (settled_at, outcome, result, pnl, bet_id),
             )
             return cursor.rowcount > 0
+
+    def save_stable_pair_bet(
+        self,
+        *,
+        created_at: str,
+        table_name: str,
+        strategy_id: str,
+        side: str,
+        stake: float,
+        signal_fingerprint: str,
+        confidence: float,
+    ) -> int | None:
+        """Arm one stable-pair paper bet without adding work to DuckDB."""
+        with self.conn:
+            if self.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            ) is not None:
+                return None
+            cursor = self.conn.execute(
+                """INSERT OR IGNORE INTO stable_pair_bets
+                (created_at, table_name, strategy_id, side, stake,
+                 signal_fingerprint, status, confidence)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                (
+                    created_at,
+                    table_name,
+                    strategy_id,
+                    side,
+                    stake,
+                    signal_fingerprint,
+                    confidence,
+                ),
+            )
+            if cursor.rowcount <= 0:
+                return None
+            return int(cursor.lastrowid)
+
+    def settle_stable_pair_bet(
+        self,
+        *,
+        bet_id: int,
+        settled_at: str,
+        outcome: str,
+        result: str,
+        pnl: float,
+    ) -> bool:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE stable_pair_bets
+                SET settled_at=?, status='settled', outcome=?, result=?, pnl=?
+                WHERE id=? AND status='pending'""",
+                (settled_at, outcome, result, pnl, bet_id),
+            )
+            return cursor.rowcount > 0
+
+    def stable_pair_rows(self, *, limit: int = 250) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT * FROM stable_pair_bets
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'stable_pair_bets')
+                AND COALESCE(stable_pair_bets.settled_at, stable_pair_bets.created_at) >= dq.started_at
+                AND COALESCE(stable_pair_bets.settled_at, stable_pair_bets.created_at) <= dq.ended_at
+            )
+            ORDER BY id DESC
+            LIMIT ?""",
+            (max(0, int(limit)),),
+        ).fetchall()
+
+    def stable_pair_summary(self) -> dict[str, int | float]:
+        row = self.conn.execute(
+            """SELECT
+              COUNT(*) AS total_count,
+              SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) AS settled_count,
+              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+              SUM(CASE WHEN result = 'W' THEN 1 ELSE 0 END) AS win_count,
+              SUM(CASE WHEN result = 'L' THEN 1 ELSE 0 END) AS loss_count,
+              SUM(CASE WHEN result = 'T' THEN 1 ELSE 0 END) AS tie_count,
+              COALESCE(SUM(CASE WHEN status = 'settled' THEN pnl ELSE 0 END), 0) AS total_pnl
+            FROM stable_pair_bets
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'stable_pair_bets')
+                AND COALESCE(stable_pair_bets.settled_at, stable_pair_bets.created_at) >= dq.started_at
+                AND COALESCE(stable_pair_bets.settled_at, stable_pair_bets.created_at) <= dq.ended_at
+            )"""
+        ).fetchone()
+        return {
+            "total_count": int(row["total_count"] or 0),
+            "settled_count": int(row["settled_count"] or 0),
+            "pending_count": int(row["pending_count"] or 0),
+            "win_count": int(row["win_count"] or 0),
+            "loss_count": int(row["loss_count"] or 0),
+            "tie_count": int(row["tie_count"] or 0),
+            "total_pnl": float(row["total_pnl"] or 0),
+        }
+
+    def pending_stable_pair_rows(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT * FROM stable_pair_bets
+            WHERE status='pending'
+            ORDER BY id"""
+        ).fetchall()
 
     def daily_experiment_rows(
         self,
@@ -886,7 +1013,14 @@ class WorkbenchStore:
     ) -> int:
         if not started_at or not ended_at or ended_at < started_at:
             raise ValueError("Invalid data quality exclusion interval.")
-        if scope not in {"all", "rounds", "signals", "paper_bets", "daily_experiment_bets"}:
+        if scope not in {
+            "all",
+            "rounds",
+            "signals",
+            "paper_bets",
+            "daily_experiment_bets",
+            "stable_pair_bets",
+        }:
             raise ValueError(f"Unsupported data quality exclusion scope: {scope}")
         with self.conn:
             cursor = self.conn.execute(
