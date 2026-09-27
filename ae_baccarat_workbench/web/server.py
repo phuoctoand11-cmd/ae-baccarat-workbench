@@ -979,12 +979,21 @@ class WebState:
                     self._adaptive_regime_pending = self.store.pending_adaptive_regime_hourly_row()
             return
         row = self._adaptive_regime_pending
+        if row is None:
+            row = self.store.pending_adaptive_regime_hourly_row(table_name)
+            if row is not None:
+                self._adaptive_regime_pending = row
         if row is None or str(row["table_name"]) != table_name:
             return
         result_event = self.store.exact_next_round_after_fingerprint(
             table_name=table_name,
             signal_fingerprint=str(row["signal_fingerprint"]),
         )
+        if result_event is None:
+            result_event = self.store.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=str(row["signal_fingerprint"]),
+            )
         settled = False
         if result_event is not None:
             outcome = str(result_event["outcome"])
