@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 SnapshotCallback = Callable[[TableSnapshot], None]
 StatusCallback = Callable[[str], None]
+CountdownCallback = Callable[[dict[str, float]], None]
 
 TEXT_MIME_HINTS = (
     "application/json",
@@ -33,6 +35,7 @@ RAW_TARGET_DOMAINS = (
     "mex777.com",
     "mhuxu.com",
     "vbgames88.com",
+    "arrpar.com",
 )
 RAW_TARGET_EXCLUDED_DOMAINS = (
     "adform.net",
@@ -104,6 +107,63 @@ RESOURCE_HINT_SCRIPT = r"""
 () => performance.getEntriesByType("resource").map((entry) => entry.name).slice(-120)
 """
 
+TABLE_COUNTDOWN_SCRIPT = r"""
+() => {
+  const rows = [];
+  for (const element of document.querySelectorAll("div")) {
+    const text = String(element.innerText || element.textContent || "")
+      .trim()
+      .replace(/\s+/g, " ");
+    const match = text.match(/^Baccarat\s+C?(\d{1,2})\s+(\d{1,2})$/i);
+    if (!match) continue;
+
+    const directText = Array.from(element.children || []).map((child) =>
+      String(child.innerText || child.textContent || "").trim().replace(/\s+/g, " ")
+    );
+    if (
+      directText.length !== 2 ||
+      !/^Baccarat\s+C?\d{1,2}$/i.test(directText[0]) ||
+      !/^\d{1,2}$/.test(directText[1])
+    ) {
+      continue;
+    }
+
+    rows.push({
+      table_name: `Baccarat C${String(Number(match[1])).padStart(2, "0")}`,
+      seconds: Number(match[2]),
+    });
+  }
+  return rows;
+}
+"""
+
+
+PAGE_KEEPALIVE_SCRIPT = r"""
+() => {
+  try {
+    const x = Math.floor(Math.random() * 200) + 100;
+    const y = Math.floor(Math.random() * 200) + 100;
+    const moveEvent = new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: x, clientY: y });
+    window.dispatchEvent(moveEvent);
+    document.dispatchEvent(moveEvent);
+    window.dispatchEvent(new Event('focus'));
+    document.dispatchEvent(new Event('focus'));
+  } catch {}
+
+  try {
+    const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, span'));
+    for (const b of buttons) {
+      const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+      if ((text === 'thử lại' || text === 'xác nhận' || text === 'tiếp tục' || text === 'đồng ý') && b.offsetParent !== null) {
+        b.click();
+        break;
+      }
+    }
+  } catch {}
+  return true;
+}
+"""
+
 
 class AeSexyCdpMonitor:
     """Read AE SEXY table road data from Chrome CDP.
@@ -117,17 +177,23 @@ class AeSexyCdpMonitor:
         cdp_url: str,
         on_snapshot: SnapshotCallback,
         on_status: StatusCallback | None = None,
+        on_countdowns: CountdownCallback | None = None,
         *,
         poll_seconds: float = 2.0,
         dom_poll_seconds: float = 5.0,
+        countdown_poll_seconds: float = 0.5,
+        keepalive_seconds: float = 15.0,
         auto_refresh_seconds: float | None = None,
         max_payload_chars: int = 1_000_000,
     ) -> None:
         self.cdp_url = cdp_url
         self.on_snapshot = on_snapshot
         self.on_status = on_status or (lambda message: None)
+        self.on_countdowns = on_countdowns
         self.poll_seconds = poll_seconds
         self.dom_poll_seconds = dom_poll_seconds
+        self.countdown_poll_seconds = max(0.2, float(countdown_poll_seconds))
+        self.keepalive_seconds = max(5.0, float(keepalive_seconds))
         self.auto_refresh_seconds = max(0.0, float(auto_refresh_seconds or 0.0))
         self.max_payload_chars = max_payload_chars
         self._running = False
@@ -156,43 +222,125 @@ class AeSexyCdpMonitor:
         self._last_live_snapshot_at = self._started_at
         self._last_watchdog_refresh_at = 0.0
         self._last_no_snapshot_hint_at = 0.0
-        self.on_status(f"Connecting to Chrome CDP: {self.cdp_url}")
-        async with async_playwright() as pw:
-            try:
-                browser = await pw.chromium.connect_over_cdp(self.cdp_url)
-            except Exception as exc:
-                self.on_status(
-                    "Cannot connect Chrome CDP. Start Chrome with --remote-debugging-port=9222, "
-                    "then open the live casino tab."
-                )
-                raise RuntimeError(f"Chrome CDP connection failed: {exc}") from exc
+        normalized_url = self.cdp_url.replace("localhost", "127.0.0.1")
 
-            self.on_status("CDP connected. Listening to WebSocket, XHR/Fetch, and page storage.")
-            if self.auto_refresh_seconds > 0:
-                self.on_status(
-                    f"Live watchdog enabled: refresh only after "
-                    f"{self.auto_refresh_seconds:.0f}s without a decoded snapshot."
-                )
+        while self._running:
+            self.on_status(f"Connecting to Chrome CDP: {normalized_url}")
             try:
-                while self._running:
-                    await self._attach_raw_targets()
-                    for context in browser.contexts:
-                        await self._attach_context(context)
-                        for page in context.pages:
-                            await self._attach_page(page)
-                            await self._poll_page_dom_if_due(page)
-                            await self._refresh_page_if_due(page)
-                    self._emit_no_snapshot_hint_if_due()
-                    await asyncio.sleep(self.poll_seconds)
-            finally:
-                self._running = False
-                for task in list(self._raw_tasks):
-                    task.cancel()
-                if self._raw_tasks:
-                    await asyncio.gather(*self._raw_tasks, return_exceptions=True)
-                with contextlib.suppress(Exception):
-                    await browser.close()
-                self.on_status("CDP monitor stopped")
+                async with async_playwright() as pw:
+                    try:
+                        browser = await pw.chromium.connect_over_cdp(normalized_url)
+                    except Exception as exc:
+                        self.on_status(
+                            "Cannot connect Chrome CDP. Start Chrome with --remote-debugging-port=9222, "
+                            "then open the live casino tab."
+                        )
+                        if not self._running:
+                            break
+                        await asyncio.sleep(2.0)
+                        continue
+
+                    self.on_status("CDP connected. Listening to WebSocket, XHR/Fetch, and page storage.")
+                    if self.auto_refresh_seconds > 0:
+                        self.on_status(
+                            f"Live watchdog enabled: refresh only after "
+                            f"{self.auto_refresh_seconds:.0f}s without a decoded snapshot."
+                        )
+                    countdown_task: asyncio.Task[None] | None = None
+                    if self.on_countdowns is not None:
+                        countdown_task = asyncio.create_task(self._run_countdown_poller(browser))
+                    keepalive_task: asyncio.Task[None] | None = asyncio.create_task(self._run_keepalive_loop(browser))
+                    try:
+                        while self._running:
+                            try:
+                                await self._attach_raw_targets()
+                                for context in list(getattr(browser, "contexts", []) or []):
+                                    await self._attach_context(context)
+                                    for page in list(getattr(context, "pages", []) or []):
+                                        await self._attach_page(page)
+                                        await self._poll_page_dom_if_due(page)
+                                        await self._refresh_page_if_due(page)
+                                self._emit_no_snapshot_hint_if_due()
+                            except Exception as loop_err:
+                                logger.debug("Transient error in CDP monitor poll loop: %s", loop_err)
+                                is_connected_fn = getattr(browser, "is_connected", None)
+                                if callable(is_connected_fn) and not is_connected_fn():
+                                    logger.warning("CDP browser disconnected: %s", loop_err)
+                                    break
+                            await asyncio.sleep(self.poll_seconds)
+                    finally:
+                        if countdown_task is not None:
+                            countdown_task.cancel()
+                            await asyncio.gather(countdown_task, return_exceptions=True)
+                        if keepalive_task is not None:
+                            keepalive_task.cancel()
+                            await asyncio.gather(keepalive_task, return_exceptions=True)
+                        for task in list(self._raw_tasks):
+                            task.cancel()
+                        if self._raw_tasks:
+                            await asyncio.gather(*self._raw_tasks, return_exceptions=True)
+                        with contextlib.suppress(Exception):
+                            await browser.close()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("CDP session encountered error: %s", exc)
+                if not self._running:
+                    break
+                self.on_status(f"CDP connection lost ({exc}). Reconnecting in 2s...")
+                await asyncio.sleep(2.0)
+
+        self._running = False
+        self.on_status("CDP monitor stopped")
+
+    async def _run_countdown_poller(self, browser: Any) -> None:
+        while self._running:
+            try:
+                saw_provider_frame, countdowns = await self._collect_table_countdowns(browser)
+                if saw_provider_frame and self.on_countdowns is not None:
+                    try:
+                        self.on_countdowns(countdowns)
+                    except Exception as exc:
+                        logger.debug("Countdown callback failed: %s", exc)
+            except Exception as exc:
+                logger.debug("Countdown poller loop error: %s", exc)
+            await asyncio.sleep(self.countdown_poll_seconds)
+
+    async def _run_keepalive_loop(self, browser: Any) -> None:
+        while self._running:
+            try:
+                for context in list(getattr(browser, "contexts", []) or []):
+                    for page in list(getattr(context, "pages", []) or []):
+                        for frame in list(getattr(page, "frames", []) or []):
+                            frame_url = str(getattr(frame, "url", "") or "").lower()
+                            if "gamehall" in frame_url or "player" in frame_url or "lobby" in frame_url:
+                                with contextlib.suppress(Exception):
+                                    await frame.evaluate(PAGE_KEEPALIVE_SCRIPT)
+            except Exception as exc:
+                logger.debug("Keepalive loop error: %s", exc)
+            await asyncio.sleep(self.keepalive_seconds)
+
+    async def _collect_table_countdowns(self, browser: Any) -> tuple[bool, dict[str, float]]:
+        saw_provider_frame = False
+        countdowns: dict[str, float] = {}
+        try:
+            for context in list(getattr(browser, "contexts", []) or []):
+                for page in list(getattr(context, "pages", []) or []):
+                    for frame in list(getattr(page, "frames", []) or []):
+                        if not _is_provider_frame_url(str(getattr(frame, "url", "") or "")):
+                            continue
+                        saw_provider_frame = True
+                        rows: Any = []
+                        with contextlib.suppress(Exception):
+                            rows = await frame.evaluate(TABLE_COUNTDOWN_SCRIPT)
+                        for table_name, seconds in _normalize_countdown_rows(rows).items():
+                            # If the same table is visible in more than one frame,
+                            # the lower reading is the safe one for the >= 10s gate.
+                            current = countdowns.get(table_name)
+                            countdowns[table_name] = seconds if current is None else min(current, seconds)
+        except Exception as exc:
+            logger.debug("Error collecting table countdowns: %s", exc)
+        return saw_provider_frame, countdowns
 
     def stop(self) -> None:
         self._running = False
@@ -354,6 +502,23 @@ class AeSexyCdpMonitor:
             return
         if not await _is_refresh_target_page(page):
             return
+
+        # Check if any provider frame is currently healthy and active with baccarat content
+        for frame in list(getattr(page, "frames", []) or []):
+            frame_url = str(getattr(frame, "url", "") or "").lower()
+            if "gamehall" in frame_url or "player" in frame_url or "lobby" in frame_url:
+                try:
+                    has_content = await frame.evaluate("""() => {
+                        return !!(document.body && document.body.innerText && (document.body.innerText.includes('Baccarat') || document.body.innerText.includes('CATEGORY')));
+                    }""")
+                    if has_content:
+                        # Session is alive and healthy. Do NOT reload, as reload kills session token!
+                        self._last_live_snapshot_at = now
+                        self._last_watchdog_refresh_at = now
+                        return
+                except Exception as exc:
+                    logger.debug("Frame evaluation error during watchdog check: %s", exc)
+
         url = str(getattr(page, "url", "") or "")
         self._last_watchdog_refresh_at = now
         # Give the reloaded page a full watchdog interval to reconnect. This
@@ -548,6 +713,39 @@ def _target_list_url(cdp_url: str) -> str:
     return urllib.parse.urlunsplit((scheme, netloc, "/json/list", "", ""))
 
 
+def _normalize_countdown_rows(rows: Any) -> dict[str, float]:
+    if not isinstance(rows, list):
+        return {}
+    countdowns: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        match = re.fullmatch(r"Baccarat\s+C?(\d{1,2})", str(row.get("table_name") or "").strip(), re.I)
+        if match is None:
+            continue
+        try:
+            seconds = float(row.get("seconds"))
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= seconds <= 120:
+            continue
+        table_name = f"Baccarat C{int(match.group(1)):02d}"
+        current = countdowns.get(table_name)
+        countdowns[table_name] = seconds if current is None else min(current, seconds)
+    return countdowns
+
+
+def _is_provider_frame_url(url: str) -> bool:
+    if not url:
+        return False
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if _is_live_provider_host(host):
+        return True
+    return "/player/" in path or "gamehall" in path or "singlebac" in path or "sx~~lobby" in url.lower()
+
+
 def _is_relevant_raw_target(target: dict[str, Any]) -> bool:
     target_type = str(target.get("type") or "").lower()
     if target_type not in {"page", "iframe", "worker"}:
@@ -559,13 +757,21 @@ def _is_relevant_raw_target(target: dict[str, Any]) -> bool:
         return True
     parsed = urllib.parse.urlsplit(url)
     host = parsed.netloc.lower()
+    path = parsed.path.lower()
     if any(_host_matches(host, domain) for domain in RAW_TARGET_EXCLUDED_DOMAINS):
         return False
     if _is_live_provider_host(host):
         return True
     if _host_matches(host, "dafabet.com"):
-        return "live-dealer" in parsed.path.lower() or "ae-live" in text or "sexy casino" in text
-    return "sfcdf." in text or "sexy casino" in text or "sx~~lobby~baccarat" in text
+        return "live-dealer" in path or "ae-live" in text or "sexy casino" in text
+    return (
+        "sfcdf." in text
+        or "sexy casino" in text
+        or "sx~~lobby~baccarat" in text
+        or "arrpar.com" in text
+        or "/player/" in path
+        or title.strip().lower() == "sexy"
+    )
 
 
 async def _is_refresh_target_page(page: Any) -> bool:
@@ -588,11 +794,23 @@ def _is_relevant_refresh_url(url: str) -> bool:
 
 def _is_relevant_refresh_text(text: str) -> bool:
     lowered = text.lower()
-    return "sfcdf." in lowered or "sexy casino" in lowered or "ae-live" in lowered or "sx~~lobby~baccarat" in lowered
+    return (
+        "sfcdf." in lowered
+        or "sexy casino" in lowered
+        or "ae-live" in lowered
+        or "sx~~lobby~baccarat" in lowered
+        or "arrpar.com" in lowered
+        or "/player/" in lowered
+        or text.strip().lower() == "sexy"
+    )
 
 
 def _is_live_provider_host(host: str) -> bool:
-    return host.startswith("sfcdf.") or any(_host_matches(host, domain) for domain in RAW_TARGET_DOMAINS)
+    return (
+        host.startswith("sfcdf.")
+        or host.startswith("bpweb.")
+        or any(_host_matches(host, domain) for domain in RAW_TARGET_DOMAINS)
+    )
 
 
 def _host_matches(host: str, domain: str) -> bool:

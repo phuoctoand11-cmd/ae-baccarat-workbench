@@ -1,6 +1,8 @@
-from .app import main
+try:
+    from .app import main
+except ImportError:
+    from ae_baccarat_workbench.app import main
 
 
 if __name__ == "__main__":
     main()
-

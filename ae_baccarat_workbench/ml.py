@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .storage import rolling_feature_select_sql
+
+logger = logging.getLogger(__name__)
 
 
 TARGET_COLUMN = "target_win"
@@ -624,7 +628,8 @@ def _score_model(
         try:
             probabilities = model.predict_proba(X_test)[:, 1]
             roc_auc = float(roc_auc_score(y_test, probabilities))
-        except Exception:
+        except (ValueError, IndexError) as exc:
+            logger.debug("ROC AUC calculation skipped: %s", exc)
             roc_auc = None
     return ModelMetrics(
         name=name,
@@ -792,12 +797,9 @@ def _markdown_table(frame: Any, columns: list[str], *, limit: int) -> str:
 def _markdown_value(value: Any) -> str:
     if value is None:
         return ""
-    try:
-        if value != value:
-            return ""
-    except Exception:
-        pass
     if isinstance(value, float):
+        if math.isnan(value):
+            return ""
         return f"{value:.4f}"
     return str(value)
 

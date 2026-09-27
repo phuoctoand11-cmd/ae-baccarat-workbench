@@ -42,11 +42,11 @@ class MoneyManager:
     def _pnl_delta(self, side: BetSide, outcome: Outcome, stake: float) -> float:
         if stake <= 0:
             return 0.0
-        if outcome is Outcome.TIE:
+        if outcome == Outcome.TIE:
             return 0.0
-        if side.outcome is not outcome:
+        if side.outcome != outcome:
             return -stake
-        if side is BetSide.BANKER:
+        if side == BetSide.BANKER:
             return stake * (1.0 - self.config.banker_commission)
         return stake
 

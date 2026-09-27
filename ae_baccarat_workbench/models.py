@@ -34,11 +34,11 @@ class BetSide(str, Enum):
 
     @property
     def outcome(self) -> Outcome:
-        return Outcome.BANKER if self is BetSide.BANKER else Outcome.PLAYER
+        return Outcome.BANKER if self == BetSide.BANKER else Outcome.PLAYER
 
     @property
     def vi_label(self) -> str:
-        return "Cai" if self is BetSide.BANKER else "Con"
+        return "Cai" if self == BetSide.BANKER else "Con"
 
 
 class StrategyAction(str, Enum):
@@ -103,7 +103,7 @@ class TableSnapshot:
     def outcomes(self, *, skip_tie: bool = False) -> list[Outcome]:
         values = [r.outcome for r in self.rounds]
         if skip_tie:
-            return [v for v in values if v is not Outcome.TIE]
+            return [v for v in values if v != Outcome.TIE]
         return values
 
     def compact_road(self, limit: int = 18) -> str:
@@ -152,7 +152,7 @@ class StrategySignal:
 
     @property
     def is_actionable(self) -> bool:
-        return self.action is StrategyAction.BET and self.side is not None
+        return self.action == StrategyAction.BET and self.side is not None
 
 
 @dataclass(frozen=True)

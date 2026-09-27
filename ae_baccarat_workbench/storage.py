@@ -3,12 +3,15 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import queue
 import re
 import sqlite3
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
-from .models import LatencySample, PaperBet, RoundEvent, StrategySignal
+from .models import LatencySample, Outcome, PaperBet, RoundEvent, StrategySignal, TableSnapshot, utc_now_iso_ms
 
 logger = logging.getLogger(__name__)
 
@@ -380,12 +383,14 @@ class WorkbenchStore:
     def __init__(self, sqlite_path: Path, duckdb_path: Path | None = None, *, enable_duckdb: bool = True) -> None:
         self.sqlite_path = sqlite_path
         self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.sqlite_path)
+        self.conn = sqlite3.connect(self.sqlite_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.duck = DuckDbMirror(duckdb_path) if enable_duckdb and duckdb_path else None
         self.init_schema()
+        self._start_autobet_audit_writer()
 
     def close(self) -> None:
+        self._stop_autobet_audit_writer()
         self.conn.close()
         if self.duck:
             self.duck.close()
@@ -458,8 +463,67 @@ class WorkbenchStore:
               outcome TEXT,
               result TEXT,
               pnl REAL NOT NULL DEFAULT 0,
-              confidence REAL NOT NULL DEFAULT 0,
-              UNIQUE(session_date, table_name)
+              confidence REAL NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS run_length_hourly_bets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_date TEXT NOT NULL,
+              session_window TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              settled_at TEXT,
+              table_name TEXT NOT NULL,
+              strategy_id TEXT NOT NULL CHECK(strategy_id = 'run_length'),
+              side TEXT NOT NULL CHECK(side IN ('B', 'P')),
+              stake REAL NOT NULL CHECK(stake > 0),
+              signal_fingerprint TEXT NOT NULL,
+              status TEXT NOT NULL,
+              outcome TEXT,
+              result TEXT,
+              pnl REAL NOT NULL DEFAULT 0,
+              confidence REAL NOT NULL CHECK(confidence >= 0.58),
+              UNIQUE(session_date, session_window),
+              UNIQUE(table_name, signal_fingerprint)
+            );
+
+            CREATE TABLE IF NOT EXISTS ensemble_majority_hourly_bets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_date TEXT NOT NULL,
+              session_window TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              settled_at TEXT,
+              table_name TEXT NOT NULL,
+              strategy_id TEXT NOT NULL CHECK(strategy_id = 'ensemble_majority'),
+              side TEXT NOT NULL CHECK(side IN ('B', 'P')),
+              stake REAL NOT NULL CHECK(stake > 0),
+              signal_fingerprint TEXT NOT NULL,
+              status TEXT NOT NULL,
+              outcome TEXT,
+              result TEXT,
+              pnl REAL NOT NULL DEFAULT 0,
+              confidence REAL NOT NULL CHECK(confidence >= 0.50),
+              UNIQUE(session_date, session_window),
+              UNIQUE(table_name, signal_fingerprint)
+            );
+
+            CREATE TABLE IF NOT EXISTS adaptive_regime_hourly_bets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_date TEXT NOT NULL,
+              session_window TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              settled_at TEXT,
+              table_name TEXT NOT NULL,
+              strategy_id TEXT NOT NULL CHECK(strategy_id = 'adaptive_regime'),
+              side TEXT NOT NULL CHECK(side IN ('B', 'P')),
+              stake REAL NOT NULL CHECK(stake > 0),
+              signal_fingerprint TEXT NOT NULL,
+              status TEXT NOT NULL,
+              outcome TEXT,
+              result TEXT,
+              pnl REAL NOT NULL DEFAULT 0,
+              confidence REAL NOT NULL CHECK(confidence >= 0.50),
+              UNIQUE(session_date, session_window),
+              UNIQUE(table_name, signal_fingerprint)
             );
 
             CREATE TABLE IF NOT EXISTS stable_pair_bets (
@@ -500,6 +564,50 @@ class WorkbenchStore:
               pending_count INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS autobet_attempts (
+              attempt_id TEXT PRIMARY KEY,
+              order_id TEXT NOT NULL,
+              source TEXT NOT NULL,
+              session_window TEXT NOT NULL,
+              signal_fingerprint TEXT NOT NULL,
+              table_name TEXT NOT NULL,
+              target_shoe TEXT NOT NULL,
+              target_round_no INTEGER,
+              side TEXT NOT NULL,
+              stake REAL NOT NULL,
+              signal_created_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              completed_at TEXT,
+              status TEXT NOT NULL,
+              reason_code TEXT NOT NULL,
+              reason_detail TEXT NOT NULL,
+              countdown_seconds REAL,
+              table_shoe TEXT,
+              table_round_no INTEGER,
+              confirm_clicked_at TEXT,
+              provider_ack_at TEXT,
+              provider_bet_id TEXT,
+              provider_status TEXT,
+              provider_error_code TEXT,
+              provider_source TEXT,
+              payload_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS autobet_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              attempt_id TEXT NOT NULL,
+              occurred_at TEXT NOT NULL,
+              stage TEXT NOT NULL,
+              status TEXT NOT NULL,
+              reason_code TEXT NOT NULL,
+              message TEXT NOT NULL,
+              countdown_seconds REAL,
+              table_shoe TEXT,
+              table_round_no INTEGER,
+              payload_json TEXT NOT NULL DEFAULT '{}'
+            );
+
             CREATE TABLE IF NOT EXISTS data_quality_exclusions (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               started_at TEXT NOT NULL,
@@ -514,12 +622,38 @@ class WorkbenchStore:
             CREATE INDEX IF NOT EXISTS idx_paper_table_time ON paper_bets(table_name, created_at);
             CREATE INDEX IF NOT EXISTS idx_paper_ml_pass_table_time
               ON paper_bets(table_name, status, reason, settled_at, created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_paper_table_fingerprint
+              ON paper_bets(table_name, signal_fingerprint, status);
             CREATE INDEX IF NOT EXISTS idx_latency_table_time
               ON latency_samples(table_name, created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_autobet_attempts_created
+              ON autobet_attempts(created_at DESC, attempt_id);
+            CREATE INDEX IF NOT EXISTS idx_autobet_attempts_reason
+              ON autobet_attempts(reason_code, status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_autobet_events_attempt_time
+              ON autobet_events(attempt_id, occurred_at, id);
             CREATE INDEX IF NOT EXISTS idx_stable_pair_status_table
               ON stable_pair_bets(status, table_name, id);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_stable_pair_one_pending_table
               ON stable_pair_bets(table_name) WHERE status = 'pending';
+            CREATE INDEX IF NOT EXISTS idx_run_length_hourly_session
+              ON run_length_hourly_bets(session_date, session_window, status, id);
+            CREATE INDEX IF NOT EXISTS idx_run_length_hourly_status_table
+              ON run_length_hourly_bets(status, table_name, id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_run_length_hourly_one_pending
+              ON run_length_hourly_bets(status) WHERE status = 'pending';
+            CREATE INDEX IF NOT EXISTS idx_ensemble_majority_hourly_session
+              ON ensemble_majority_hourly_bets(session_date, session_window, status, id);
+            CREATE INDEX IF NOT EXISTS idx_ensemble_majority_hourly_status_table
+              ON ensemble_majority_hourly_bets(status, table_name, id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ensemble_majority_hourly_one_pending
+              ON ensemble_majority_hourly_bets(status) WHERE status = 'pending';
+            CREATE INDEX IF NOT EXISTS idx_adaptive_regime_hourly_session
+              ON adaptive_regime_hourly_bets(session_date, session_window, status, id);
+            CREATE INDEX IF NOT EXISTS idx_adaptive_regime_hourly_status_table
+              ON adaptive_regime_hourly_bets(status, table_name, id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_adaptive_regime_hourly_one_pending
+              ON adaptive_regime_hourly_bets(status) WHERE status = 'pending';
             CREATE INDEX IF NOT EXISTS idx_data_quality_exclusions_time
               ON data_quality_exclusions(started_at, ended_at, scope);
             """
@@ -533,6 +667,21 @@ class WorkbenchStore:
                 "ALTER TABLE daily_experiment_bets "
                 "ADD COLUMN session_window TEXT NOT NULL DEFAULT '12:00-13:00'"
             )
+        autobet_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(autobet_attempts)").fetchall()
+        }
+        for column_name in (
+            "provider_bet_id",
+            "provider_status",
+            "provider_error_code",
+            "provider_source",
+        ):
+            if column_name not in autobet_columns:
+                self.conn.execute(
+                    f"ALTER TABLE autobet_attempts ADD COLUMN {column_name} TEXT"
+                )
+        self._remove_daily_experiment_one_table_per_day_constraint()
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_daily_experiment_session "
             "ON daily_experiment_bets(session_date, session_window, status, id)"
@@ -541,6 +690,286 @@ class WorkbenchStore:
         if self.duck:
             self.duck.init_schema()
             self.duck.sync_from_sqlite(self.conn)
+
+    def _start_autobet_audit_writer(self) -> None:
+        self._autobet_audit_queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=10_000)
+        self._autobet_audit_thread = threading.Thread(
+            target=self._autobet_audit_worker,
+            daemon=True,
+            name="autobet-audit-writer",
+        )
+        self._autobet_audit_thread.start()
+
+    def _stop_autobet_audit_writer(self) -> None:
+        audit_queue = getattr(self, "_autobet_audit_queue", None)
+        audit_thread = getattr(self, "_autobet_audit_thread", None)
+        if audit_queue is None or audit_thread is None:
+            return
+        self.flush_autobet_audit(timeout=3.0)
+        audit_queue.put(None)
+        audit_thread.join(timeout=3.0)
+        self._autobet_audit_thread = None
+        self._autobet_audit_queue = None
+
+    def enqueue_autobet_audit(self, event: Mapping[str, Any]) -> bool:
+        """Queue one append-only Auto-Bet audit event without blocking live processing."""
+        audit_queue = getattr(self, "_autobet_audit_queue", None)
+        if audit_queue is None:
+            return False
+        try:
+            audit_queue.put_nowait(dict(event))
+        except queue.Full:
+            logger.error("Auto-Bet audit queue is full; event was not persisted: %s", event.get("attempt_id"))
+            return False
+        return True
+
+    def flush_autobet_audit(self, timeout: float = 3.0) -> bool:
+        audit_queue = getattr(self, "_autobet_audit_queue", None)
+        audit_thread = getattr(self, "_autobet_audit_thread", None)
+        if audit_queue is None or audit_thread is None or not audit_thread.is_alive():
+            return True
+        barrier = threading.Event()
+        try:
+            audit_queue.put_nowait({"_barrier": barrier})
+        except queue.Full:
+            return False
+        return barrier.wait(timeout=max(0.0, timeout))
+
+    def _autobet_audit_worker(self) -> None:
+        connection = sqlite3.connect(self.sqlite_path, timeout=5.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=5000")
+        audit_queue = self._autobet_audit_queue
+        try:
+            while True:
+                event = audit_queue.get()
+                try:
+                    if event is None:
+                        return
+                    barrier = event.get("_barrier")
+                    if barrier is not None and hasattr(barrier, "set"):
+                        connection.commit()
+                        barrier.set()
+                        continue
+                    self._write_autobet_audit_event(connection, event)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    logger.exception("Could not persist Auto-Bet audit event")
+                finally:
+                    audit_queue.task_done()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _write_autobet_audit_event(connection: sqlite3.Connection, event: Mapping[str, Any]) -> None:
+        attempt_id = str(event.get("attempt_id") or "").strip()
+        if not attempt_id:
+            raise ValueError("Auto-Bet audit event requires attempt_id")
+        occurred_at = str(event.get("occurred_at") or utc_now_iso_ms())
+        stage = str(event.get("stage") or "UNKNOWN")
+        status = str(event.get("status") or "running")
+        reason_code = str(event.get("reason_code") or stage)
+        message = str(event.get("message") or "")
+        raw_payload = event.get("payload")
+        payload = dict(raw_payload) if isinstance(raw_payload, Mapping) else {}
+        payload_json = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        countdown = event.get("countdown_seconds")
+        table_round = event.get("table_round_no")
+        terminal_statuses = {
+            "skipped",
+            "failed",
+            "unknown",
+            "ack_timeout",
+            "provider_accepted",
+            "provider_rejected",
+        }
+        completed_at = occurred_at if status in terminal_statuses else None
+        confirm_clicked_at = occurred_at if stage == "CONFIRM_CLICKED" else None
+        provider_ack_at = occurred_at if stage in {"PROVIDER_ACCEPTED", "PROVIDER_REJECTED"} else None
+        provider_bet_id = str(payload.get("provider_bet_id") or "") or None
+        provider_status = str(payload.get("provider_status") or "") or None
+        provider_error_code = str(payload.get("provider_error_code") or "") or None
+        provider_source = str(payload.get("provider_source") or "") or None
+
+        connection.execute(
+            """
+            INSERT INTO autobet_attempts (
+              attempt_id, order_id, source, session_window, signal_fingerprint,
+              table_name, target_shoe, target_round_no, side, stake,
+              signal_created_at, created_at, updated_at, completed_at,
+              status, reason_code, reason_detail, countdown_seconds,
+              table_shoe, table_round_no, confirm_clicked_at, provider_ack_at,
+              provider_bet_id, provider_status, provider_error_code, provider_source,
+              payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(attempt_id) DO UPDATE SET
+              updated_at=excluded.updated_at,
+              completed_at=COALESCE(excluded.completed_at, autobet_attempts.completed_at),
+              status=excluded.status,
+              reason_code=excluded.reason_code,
+              reason_detail=excluded.reason_detail,
+              countdown_seconds=COALESCE(excluded.countdown_seconds, autobet_attempts.countdown_seconds),
+              table_shoe=COALESCE(excluded.table_shoe, autobet_attempts.table_shoe),
+              table_round_no=COALESCE(excluded.table_round_no, autobet_attempts.table_round_no),
+              confirm_clicked_at=COALESCE(excluded.confirm_clicked_at, autobet_attempts.confirm_clicked_at),
+              provider_ack_at=COALESCE(excluded.provider_ack_at, autobet_attempts.provider_ack_at),
+              provider_bet_id=COALESCE(excluded.provider_bet_id, autobet_attempts.provider_bet_id),
+              provider_status=COALESCE(excluded.provider_status, autobet_attempts.provider_status),
+              provider_error_code=COALESCE(excluded.provider_error_code, autobet_attempts.provider_error_code),
+              provider_source=COALESCE(excluded.provider_source, autobet_attempts.provider_source),
+              payload_json=excluded.payload_json
+            """,
+            (
+                attempt_id,
+                str(event.get("order_id") or ""),
+                str(event.get("source") or "unknown"),
+                str(event.get("session_window") or ""),
+                str(event.get("signal_fingerprint") or ""),
+                str(event.get("table_name") or ""),
+                str(event.get("target_shoe") or ""),
+                int(event["target_round_no"]) if event.get("target_round_no") is not None else None,
+                str(event.get("side") or ""),
+                float(event.get("stake") or 0.0),
+                str(event.get("signal_created_at") or "") or None,
+                str(event.get("attempt_created_at") or occurred_at),
+                occurred_at,
+                completed_at,
+                status,
+                reason_code,
+                message,
+                float(countdown) if countdown is not None else None,
+                str(event.get("table_shoe")) if event.get("table_shoe") is not None else None,
+                int(table_round) if table_round is not None else None,
+                confirm_clicked_at,
+                provider_ack_at,
+                provider_bet_id,
+                provider_status,
+                provider_error_code,
+                provider_source,
+                payload_json,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO autobet_events (
+              attempt_id, occurred_at, stage, status, reason_code, message,
+              countdown_seconds, table_shoe, table_round_no, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                attempt_id,
+                occurred_at,
+                stage,
+                status,
+                reason_code,
+                message,
+                float(countdown) if countdown is not None else None,
+                str(event.get("table_shoe")) if event.get("table_shoe") is not None else None,
+                int(table_round) if table_round is not None else None,
+                payload_json,
+            ),
+        )
+
+    def autobet_attempt_rows(self, limit: int = 250) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM autobet_attempts
+            ORDER BY created_at DESC, attempt_id DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+
+    def autobet_event_rows(self, attempt_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM autobet_events
+            WHERE attempt_id = ?
+            ORDER BY occurred_at, id
+            """,
+            (attempt_id,),
+        ).fetchall()
+
+    def autobet_audit_summary(self, since: str | None = None) -> dict[str, Any]:
+        where_sql = "WHERE created_at >= ?" if since else ""
+        params: tuple[Any, ...] = (since,) if since else ()
+        rows = self.conn.execute(
+            f"""
+            SELECT status, reason_code, COUNT(*) AS count
+            FROM autobet_attempts
+            {where_sql}
+            GROUP BY status, reason_code
+            ORDER BY count DESC, status, reason_code
+            """,
+            params,
+        ).fetchall()
+        status_counts: dict[str, int] = {}
+        reason_counts: dict[str, int] = {}
+        for row in rows:
+            status = str(row["status"])
+            reason = str(row["reason_code"])
+            count = int(row["count"])
+            status_counts[status] = status_counts.get(status, 0) + count
+            reason_counts[reason] = reason_counts.get(reason, 0) + count
+        return {
+            "total": sum(status_counts.values()),
+            "status_counts": status_counts,
+            "reason_counts": reason_counts,
+        }
+
+    def _remove_daily_experiment_one_table_per_day_constraint(self) -> None:
+        schema_row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_experiment_bets'"
+        ).fetchone()
+        if schema_row is None:
+            return
+        compact_schema = re.sub(r"\s+", "", str(schema_row["sql"] or "").lower())
+        if "unique(session_date,table_name)" not in compact_schema:
+            return
+
+        with self.conn:
+            self.conn.execute(
+                "ALTER TABLE daily_experiment_bets RENAME TO daily_experiment_bets_one_per_day"
+            )
+            self.conn.execute(
+                """CREATE TABLE daily_experiment_bets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_date TEXT NOT NULL,
+                session_window TEXT NOT NULL DEFAULT '12:00-13:00',
+                created_at TEXT NOT NULL,
+                settled_at TEXT,
+                table_name TEXT NOT NULL,
+                strategy_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                stake REAL NOT NULL,
+                signal_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL,
+                outcome TEXT,
+                result TEXT,
+                pnl REAL NOT NULL DEFAULT 0,
+                confidence REAL NOT NULL DEFAULT 0
+                )"""
+            )
+            self.conn.execute(
+                """INSERT INTO daily_experiment_bets
+                (id, session_date, session_window, created_at, settled_at, table_name,
+                 strategy_id, side, stake, signal_fingerprint, status, outcome, result,
+                 pnl, confidence)
+                SELECT id, session_date, session_window, created_at, settled_at, table_name,
+                       strategy_id, side, stake, signal_fingerprint, status, outcome, result,
+                       pnl, confidence
+                FROM daily_experiment_bets_one_per_day"""
+            )
+            self.conn.execute("DROP TABLE daily_experiment_bets_one_per_day")
 
     def upsert_rounds(self, rounds: Iterable[RoundEvent]) -> None:
         rows = list(rounds)
@@ -592,6 +1021,50 @@ class WorkbenchStore:
                 )
         if self.duck:
             self.duck.append_rounds(inserted_rows)
+
+    def load_latest_snapshots(self) -> list[TableSnapshot]:
+        """Reconstruct latest table snapshots from recent rounds in SQLite."""
+        tables = self.conn.execute(
+            "SELECT table_name, table_id, last_seen FROM tables ORDER BY last_seen DESC LIMIT 50"
+        ).fetchall()
+        snapshots: list[TableSnapshot] = []
+        for t in tables:
+            tname = str(t["table_name"])
+            last_round = self.conn.execute(
+                "SELECT * FROM rounds WHERE table_name = ? ORDER BY id DESC LIMIT 1",
+                (tname,),
+            ).fetchone()
+            if not last_round:
+                continue
+            shoe = last_round["shoe"]
+            shoe_rounds = self.conn.execute(
+                "SELECT * FROM rounds WHERE table_name = ? AND shoe IS ? ORDER BY round_no ASC, observed_at ASC",
+                (tname, shoe),
+            ).fetchall()
+            events = [
+                RoundEvent(
+                    table_name=tname,
+                    table_id=r["table_id"],
+                    round_no=r["round_no"],
+                    outcome=Outcome(r["outcome"]),
+                    source=r["source"],
+                    observed_at=r["observed_at"],
+                    shoe=r["shoe"],
+                )
+                for r in shoe_rounds
+                if r["outcome"] in ("B", "P", "T")
+            ]
+            if events:
+                snapshots.append(
+                    TableSnapshot(
+                        table_name=tname,
+                        table_id=t["table_id"],
+                        rounds=tuple(events),
+                        last_seen=t["last_seen"] or events[-1].observed_at,
+                        shoe=shoe,
+                    )
+                )
+        return snapshots
 
     def save_signal(self, signal: StrategySignal) -> None:
         with self.conn:
@@ -656,13 +1129,36 @@ class WorkbenchStore:
         signal_fingerprint: str,
         confidence: float,
         max_per_window: int = 2,
+        stop_win_enabled: bool = False,
     ) -> bool:
+        try:
+            call_dt = datetime.fromisoformat(created_at)
+        except Exception:
+            call_dt = None
         with self.conn:
+            self.settle_stale_daily_experiment_bets(now_dt=call_dt)
+            if self.pending_daily_experiment_row() is not None:
+                return False
             if self.next_round_after_fingerprint(
                 table_name=table_name,
                 signal_fingerprint=signal_fingerprint,
             ) is not None:
                 return False
+            duplicate = self.conn.execute(
+                """SELECT 1 FROM daily_experiment_bets
+                WHERE table_name=? AND signal_fingerprint=? LIMIT 1""",
+                (table_name, signal_fingerprint),
+            ).fetchone()
+            if duplicate is not None:
+                return False
+            if stop_win_enabled:
+                has_win = self.conn.execute(
+                    """SELECT 1 FROM daily_experiment_bets
+                    WHERE session_date=? AND session_window=? AND result='W' LIMIT 1""",
+                    (session_date, session_window),
+                ).fetchone()
+                if has_win is not None:
+                    return False
             row = self.conn.execute(
                 """SELECT COUNT(*) AS row_count
                 FROM daily_experiment_bets
@@ -672,7 +1168,7 @@ class WorkbenchStore:
             if int(row["row_count"] or 0) >= max_per_window:
                 return False
             cursor = self.conn.execute(
-                """INSERT OR IGNORE INTO daily_experiment_bets
+                """INSERT INTO daily_experiment_bets
                 (session_date, session_window, created_at, table_name, strategy_id, side, stake,
                  signal_fingerprint, status, confidence)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
@@ -706,6 +1202,971 @@ class WorkbenchStore:
                 (settled_at, outcome, result, pnl, bet_id),
             )
             return cursor.rowcount > 0
+
+    def daily_window_has_won(self, session_date: str, session_window: str) -> bool:
+        """Check if any bet in the specified session window has already won (result = 'W')."""
+        with self.conn:
+            row = self.conn.execute(
+                """SELECT 1 FROM daily_experiment_bets
+                WHERE session_date=? AND session_window=? AND result='W' LIMIT 1""",
+                (session_date, session_window),
+            ).fetchone()
+            return row is not None
+
+    def settle_stale_daily_experiment_bets(
+        self,
+        *,
+        max_age_seconds: float = 180.0,
+        banker_commission: float = 0.05,
+        now_dt: datetime | None = None,
+    ) -> list[int]:
+        """Settle pending daily experiment bets if next round arrived, shoe ended, or timeout exceeded."""
+        if now_dt is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+        now_iso = now_dt.isoformat()
+
+        pending_rows = self.conn.execute(
+            """SELECT * FROM daily_experiment_bets
+            WHERE status='pending'
+            ORDER BY id ASC"""
+        ).fetchall()
+
+        if not pending_rows:
+            return []
+
+        settled_ids: list[int] = []
+        for row in pending_rows:
+            bet_id = int(row["id"])
+            table_name = str(row["table_name"])
+            signal_fingerprint = str(row["signal_fingerprint"])
+            side = str(row["side"])
+            stake = float(row["stake"])
+            created_at_str = str(row["created_at"])
+
+            # 1. Check if next round was recorded in database
+            result_event = self.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            )
+            if result_event is not None:
+                outcome = str(result_event["outcome"])
+                if outcome == "T":
+                    result, pnl = "T", 0.0
+                elif outcome != side:
+                    result, pnl = "L", round(-stake, 2)
+                else:
+                    multiplier = 1.0 - banker_commission if side == "B" else 1.0
+                    result, pnl = "W", round(stake * multiplier, 2)
+                if self.settle_daily_experiment_bet(
+                    bet_id=bet_id,
+                    settled_at=str(result_event["observed_at"]),
+                    outcome=outcome,
+                    result=result,
+                    pnl=pnl,
+                ):
+                    settled_ids.append(bet_id)
+                continue
+
+            # 2. Check if shoe finished after this signal
+            if self.is_shoe_finished_after_signal(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            ):
+                if self.settle_daily_experiment_bet(
+                    bet_id=bet_id,
+                    settled_at=now_iso,
+                    outcome="VOID",
+                    result="T",
+                    pnl=0.0,
+                ):
+                    settled_ids.append(bet_id)
+                continue
+
+            # 3. Check age timeout (e.g. 180s)
+            try:
+                created_dt = datetime.fromisoformat(created_at_str)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                age = (now_dt - created_dt).total_seconds()
+            except Exception:
+                age = max_age_seconds + 1.0
+
+            if age >= max_age_seconds:
+                if self.settle_daily_experiment_bet(
+                    bet_id=bet_id,
+                    settled_at=now_iso,
+                    outcome="TIMEOUT",
+                    result="T",
+                    pnl=0.0,
+                ):
+                    settled_ids.append(bet_id)
+
+        return settled_ids
+
+    def save_run_length_hourly_bet(
+        self,
+        *,
+        session_date: str,
+        session_window: str,
+        created_at: str,
+        table_name: str,
+        side: str,
+        stake: float,
+        signal_fingerprint: str,
+        confidence: float,
+    ) -> int | None:
+        """Arm one run_length >=58% paper order without touching DuckDB."""
+        if (
+            not session_date
+            or not session_window
+            or not table_name
+            or not signal_fingerprint
+            or side not in {"B", "P"}
+            or stake <= 0
+            or confidence < 0.58
+        ):
+            return None
+        try:
+            call_dt = datetime.fromisoformat(created_at)
+        except Exception:
+            call_dt = None
+        with self.conn:
+            self.settle_stale_run_length_hourly_bets(now_dt=call_dt)
+            if self.pending_run_length_hourly_row() is not None:
+                return None
+            if self.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            ) is not None:
+                return None
+            cursor = self.conn.execute(
+                """INSERT OR IGNORE INTO run_length_hourly_bets
+                (session_date, session_window, created_at, table_name, strategy_id,
+                 side, stake, signal_fingerprint, status, confidence)
+                VALUES (?, ?, ?, ?, 'run_length', ?, ?, ?, 'pending', ?)""",
+                (
+                    session_date,
+                    session_window,
+                    created_at,
+                    table_name,
+                    side,
+                    stake,
+                    signal_fingerprint,
+                    confidence,
+                ),
+            )
+            if cursor.rowcount <= 0:
+                return None
+            return int(cursor.lastrowid)
+
+    def settle_run_length_hourly_bet(
+        self,
+        *,
+        bet_id: int,
+        settled_at: str,
+        outcome: str,
+        result: str,
+        pnl: float,
+    ) -> bool:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE run_length_hourly_bets
+                SET settled_at=?, status='settled', outcome=?, result=?, pnl=?
+                WHERE id=? AND status='pending'""",
+                (settled_at, outcome, result, pnl, bet_id),
+            )
+            return cursor.rowcount > 0
+
+    def settle_stale_run_length_hourly_bets(
+        self,
+        *,
+        max_age_seconds: float = 180.0,
+        banker_commission: float = 0.05,
+        now_dt: datetime | None = None,
+    ) -> list[int]:
+        """Settle pending run length hourly bets if next round arrived, shoe ended, or timeout exceeded."""
+        if now_dt is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+        now_iso = now_dt.isoformat()
+
+        pending_rows = self.conn.execute(
+            """SELECT * FROM run_length_hourly_bets
+            WHERE status='pending'
+            ORDER BY id ASC"""
+        ).fetchall()
+
+        if not pending_rows:
+            return []
+
+        settled_ids: list[int] = []
+        for row in pending_rows:
+            bet_id = int(row["id"])
+            table_name = str(row["table_name"])
+            signal_fingerprint = str(row["signal_fingerprint"])
+            side = str(row["side"])
+            stake = float(row["stake"])
+            created_at_str = str(row["created_at"])
+
+            # 1. Check if next round was recorded in database
+            result_event = self.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            )
+            if result_event is not None:
+                outcome = str(result_event["outcome"])
+                if outcome == "T":
+                    result, pnl = "T", 0.0
+                elif outcome != side:
+                    result, pnl = "L", round(-stake, 2)
+                else:
+                    multiplier = 1.0 - banker_commission if side == "B" else 1.0
+                    result, pnl = "W", round(stake * multiplier, 2)
+                if self.settle_run_length_hourly_bet(
+                    bet_id=bet_id,
+                    settled_at=str(result_event["observed_at"]),
+                    outcome=outcome,
+                    result=result,
+                    pnl=pnl,
+                ):
+                    settled_ids.append(bet_id)
+                continue
+
+            # 2. Check if shoe finished after this signal
+            if self.is_shoe_finished_after_signal(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            ):
+                if self.settle_run_length_hourly_bet(
+                    bet_id=bet_id,
+                    settled_at=now_iso,
+                    outcome="VOID",
+                    result="T",
+                    pnl=0.0,
+                ):
+                    settled_ids.append(bet_id)
+                continue
+
+            # 3. Check age timeout (e.g. 180s)
+            try:
+                created_dt = datetime.fromisoformat(created_at_str)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                age = (now_dt - created_dt).total_seconds()
+            except Exception:
+                age = max_age_seconds + 1.0
+
+            if age >= max_age_seconds:
+                if self.settle_run_length_hourly_bet(
+                    bet_id=bet_id,
+                    settled_at=now_iso,
+                    outcome="TIMEOUT",
+                    result="T",
+                    pnl=0.0,
+                ):
+                    settled_ids.append(bet_id)
+
+        return settled_ids
+
+    def pending_run_length_hourly_row(
+        self,
+        table_name: str | None = None,
+    ) -> sqlite3.Row | None:
+        table_filter = " AND table_name=?" if table_name is not None else ""
+        params: tuple[object, ...] = (table_name,) if table_name is not None else ()
+        return self.conn.execute(
+            f"""SELECT * FROM run_length_hourly_bets
+            WHERE status='pending'{table_filter}
+            ORDER BY id DESC LIMIT 1""",
+            params,
+        ).fetchone()
+
+    def run_length_hourly_rows(
+        self,
+        session_date: str | None = None,
+        session_window: str | None = None,
+        *,
+        limit: int | None = None,
+    ) -> list[sqlite3.Row]:
+        filters = [
+            """NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'run_length_hourly_bets')
+                AND COALESCE(run_length_hourly_bets.settled_at, run_length_hourly_bets.created_at) >= dq.started_at
+                AND COALESCE(run_length_hourly_bets.settled_at, run_length_hourly_bets.created_at) <= dq.ended_at
+            )"""
+        ]
+        params: list[object] = []
+        if session_date:
+            filters.append("session_date = ?")
+            params.append(session_date)
+        if session_window:
+            filters.append("session_window = ?")
+            params.append(session_window)
+        order_clause = " ORDER BY id" if session_date else " ORDER BY id DESC"
+        limit_clause = " LIMIT ?" if limit is not None else ""
+        if limit is not None:
+            params.append(max(0, int(limit)))
+        return self.conn.execute(
+            f"""SELECT * FROM run_length_hourly_bets
+            WHERE {' AND '.join(filters)}{order_clause}{limit_clause}""",
+            tuple(params),
+        ).fetchall()
+
+    def run_length_hourly_dates(self, *, limit: int = 366) -> list[str]:
+        rows = self.conn.execute(
+            """SELECT session_date
+            FROM run_length_hourly_bets
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'run_length_hourly_bets')
+                AND COALESCE(run_length_hourly_bets.settled_at, run_length_hourly_bets.created_at) >= dq.started_at
+                AND COALESCE(run_length_hourly_bets.settled_at, run_length_hourly_bets.created_at) <= dq.ended_at
+            )
+            GROUP BY session_date
+            ORDER BY session_date DESC
+            LIMIT ?""",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [str(row["session_date"]) for row in rows]
+
+    def run_length_hourly_summary(
+        self,
+        session_date: str | None = None,
+        session_window: str | None = None,
+    ) -> dict[str, int | float]:
+        filters = [
+            """NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'run_length_hourly_bets')
+                AND COALESCE(run_length_hourly_bets.settled_at, run_length_hourly_bets.created_at) >= dq.started_at
+                AND COALESCE(run_length_hourly_bets.settled_at, run_length_hourly_bets.created_at) <= dq.ended_at
+            )"""
+        ]
+        params: list[object] = []
+        if session_date:
+            filters.append("session_date = ?")
+            params.append(session_date)
+        if session_window:
+            filters.append("session_window = ?")
+            params.append(session_window)
+        row = self.conn.execute(
+            f"""SELECT
+              COUNT(*) AS total_count,
+              SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) AS settled_count,
+              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+              SUM(CASE WHEN result = 'W' THEN 1 ELSE 0 END) AS win_count,
+              SUM(CASE WHEN result = 'L' THEN 1 ELSE 0 END) AS loss_count,
+              SUM(CASE WHEN result = 'T' THEN 1 ELSE 0 END) AS tie_count,
+              COALESCE(SUM(CASE WHEN status = 'settled' THEN pnl ELSE 0 END), 0) AS total_pnl
+            FROM run_length_hourly_bets
+            WHERE {' AND '.join(filters)}""",
+            tuple(params),
+        ).fetchone()
+        return {
+            "total_count": int(row["total_count"] or 0),
+            "settled_count": int(row["settled_count"] or 0),
+            "pending_count": int(row["pending_count"] or 0),
+            "win_count": int(row["win_count"] or 0),
+            "loss_count": int(row["loss_count"] or 0),
+            "tie_count": int(row["tie_count"] or 0),
+            "total_pnl": float(row["total_pnl"] or 0),
+        }
+
+    def run_length_hourly_slot_keys(self, session_date: str) -> set[tuple[str, str]]:
+        rows = self.conn.execute(
+            """SELECT session_date, session_window
+            FROM run_length_hourly_bets
+            WHERE session_date=?""",
+            (session_date,),
+        ).fetchall()
+        return {(str(row["session_date"]), str(row["session_window"])) for row in rows}
+
+    def run_length_hourly_slot_used(self, session_date: str, session_window: str) -> bool:
+        row = self.conn.execute(
+            """SELECT 1 FROM run_length_hourly_bets
+            WHERE session_date=? AND session_window=? LIMIT 1""",
+            (session_date, session_window),
+        ).fetchone()
+        return row is not None
+
+    def save_ensemble_majority_hourly_bet(
+        self,
+        *,
+        session_date: str,
+        session_window: str,
+        created_at: str,
+        table_name: str,
+        side: str,
+        stake: float,
+        signal_fingerprint: str,
+        confidence: float,
+    ) -> int | None:
+        if (
+            not session_date
+            or not session_window
+            or not created_at
+            or not table_name
+            or side not in {"B", "P"}
+            or stake <= 0
+            or confidence < 0.50
+        ):
+            return None
+        try:
+            call_dt = datetime.fromisoformat(created_at)
+        except Exception:
+            call_dt = None
+        with self.conn:
+            self.settle_stale_ensemble_majority_hourly_bets(now_dt=call_dt)
+            if self.pending_ensemble_majority_hourly_row() is not None:
+                return None
+            if self.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            ) is not None:
+                return None
+            cursor = self.conn.execute(
+                """INSERT OR IGNORE INTO ensemble_majority_hourly_bets
+                (session_date, session_window, created_at, table_name, strategy_id,
+                 side, stake, signal_fingerprint, status, confidence)
+                VALUES (?, ?, ?, ?, 'ensemble_majority', ?, ?, ?, 'pending', ?)""",
+                (
+                    session_date,
+                    session_window,
+                    created_at,
+                    table_name,
+                    side,
+                    stake,
+                    signal_fingerprint,
+                    confidence,
+                ),
+            )
+            if cursor.rowcount <= 0:
+                return None
+            return int(cursor.lastrowid)
+
+    def settle_ensemble_majority_hourly_bet(
+        self,
+        *,
+        bet_id: int,
+        settled_at: str,
+        outcome: str,
+        result: str,
+        pnl: float,
+    ) -> bool:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE ensemble_majority_hourly_bets
+                SET settled_at=?, status='settled', outcome=?, result=?, pnl=?
+                WHERE id=? AND status='pending'""",
+                (settled_at, outcome, result, pnl, bet_id),
+            )
+            return cursor.rowcount > 0
+
+    def settle_stale_ensemble_majority_hourly_bets(
+        self,
+        *,
+        max_age_seconds: float = 180.0,
+        banker_commission: float = 0.05,
+        now_dt: datetime | None = None,
+    ) -> list[int]:
+        if now_dt is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+        now_iso = now_dt.isoformat()
+
+        pending_rows = self.conn.execute(
+            """SELECT * FROM ensemble_majority_hourly_bets
+            WHERE status='pending'
+            ORDER BY id ASC"""
+        ).fetchall()
+
+        if not pending_rows:
+            return []
+
+        settled_ids: list[int] = []
+        for row in pending_rows:
+            bet_id = int(row["id"])
+            table_name = str(row["table_name"])
+            signal_fingerprint = str(row["signal_fingerprint"])
+            side = str(row["side"])
+            stake = float(row["stake"])
+            created_at_str = str(row["created_at"])
+
+            result_event = self.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            )
+            if result_event is not None:
+                outcome = str(result_event["outcome"])
+                if outcome == "T":
+                    result, pnl = "T", 0.0
+                elif outcome != side:
+                    result, pnl = "L", round(-stake, 2)
+                else:
+                    multiplier = 1.0 - banker_commission if side == "B" else 1.0
+                    result, pnl = "W", round(stake * multiplier, 2)
+                if self.settle_ensemble_majority_hourly_bet(
+                    bet_id=bet_id,
+                    settled_at=str(result_event["observed_at"]),
+                    outcome=outcome,
+                    result=result,
+                    pnl=pnl,
+                ):
+                    settled_ids.append(bet_id)
+                continue
+
+            if self.is_shoe_finished_after_signal(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            ):
+                if self.settle_ensemble_majority_hourly_bet(
+                    bet_id=bet_id,
+                    settled_at=now_iso,
+                    outcome="VOID",
+                    result="T",
+                    pnl=0.0,
+                ):
+                    settled_ids.append(bet_id)
+                continue
+
+            try:
+                created_dt = datetime.fromisoformat(created_at_str)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                age = (now_dt - created_dt).total_seconds()
+            except Exception:
+                age = max_age_seconds + 1.0
+
+            if age >= max_age_seconds:
+                if self.settle_ensemble_majority_hourly_bet(
+                    bet_id=bet_id,
+                    settled_at=now_iso,
+                    outcome="TIMEOUT",
+                    result="T",
+                    pnl=0.0,
+                ):
+                    settled_ids.append(bet_id)
+
+        return settled_ids
+
+    def pending_ensemble_majority_hourly_row(
+        self,
+        table_name: str | None = None,
+    ) -> sqlite3.Row | None:
+        table_filter = " AND table_name=?" if table_name is not None else ""
+        params: tuple[object, ...] = (table_name,) if table_name is not None else ()
+        return self.conn.execute(
+            f"""SELECT * FROM ensemble_majority_hourly_bets
+            WHERE status='pending'{table_filter}
+            ORDER BY id DESC LIMIT 1""",
+            params,
+        ).fetchone()
+
+    def ensemble_majority_hourly_rows(
+        self,
+        session_date: str | None = None,
+        session_window: str | None = None,
+        *,
+        limit: int | None = None,
+    ) -> list[sqlite3.Row]:
+        filters = [
+            """NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'ensemble_majority_hourly_bets')
+                AND COALESCE(ensemble_majority_hourly_bets.settled_at, ensemble_majority_hourly_bets.created_at) >= dq.started_at
+                AND COALESCE(ensemble_majority_hourly_bets.settled_at, ensemble_majority_hourly_bets.created_at) <= dq.ended_at
+            )"""
+        ]
+        params: list[object] = []
+        if session_date:
+            filters.append("session_date = ?")
+            params.append(session_date)
+        if session_window:
+            filters.append("session_window = ?")
+            params.append(session_window)
+        order_clause = " ORDER BY id" if session_date else " ORDER BY id DESC"
+        limit_clause = " LIMIT ?" if limit is not None else ""
+        if limit is not None:
+            params.append(max(0, int(limit)))
+        return self.conn.execute(
+            f"""SELECT * FROM ensemble_majority_hourly_bets
+            WHERE {' AND '.join(filters)}{order_clause}{limit_clause}""",
+            tuple(params),
+        ).fetchall()
+
+    def ensemble_majority_hourly_dates(self, *, limit: int = 366) -> list[str]:
+        rows = self.conn.execute(
+            """SELECT session_date
+            FROM ensemble_majority_hourly_bets
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'ensemble_majority_hourly_bets')
+                AND COALESCE(ensemble_majority_hourly_bets.settled_at, ensemble_majority_hourly_bets.created_at) >= dq.started_at
+                AND COALESCE(ensemble_majority_hourly_bets.settled_at, ensemble_majority_hourly_bets.created_at) <= dq.ended_at
+            )
+            GROUP BY session_date
+            ORDER BY session_date DESC
+            LIMIT ?""",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [str(row["session_date"]) for row in rows]
+
+    def ensemble_majority_hourly_summary(
+        self,
+        session_date: str | None = None,
+        session_window: str | None = None,
+    ) -> dict[str, int | float]:
+        filters = [
+            """NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'ensemble_majority_hourly_bets')
+                AND COALESCE(ensemble_majority_hourly_bets.settled_at, ensemble_majority_hourly_bets.created_at) >= dq.started_at
+                AND COALESCE(ensemble_majority_hourly_bets.settled_at, ensemble_majority_hourly_bets.created_at) <= dq.ended_at
+            )"""
+        ]
+        params: list[object] = []
+        if session_date:
+            filters.append("session_date = ?")
+            params.append(session_date)
+        if session_window:
+            filters.append("session_window = ?")
+            params.append(session_window)
+        row = self.conn.execute(
+            f"""SELECT
+              COUNT(*) AS total_count,
+              SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) AS settled_count,
+              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+              SUM(CASE WHEN result = 'W' THEN 1 ELSE 0 END) AS win_count,
+              SUM(CASE WHEN result = 'L' THEN 1 ELSE 0 END) AS loss_count,
+              SUM(CASE WHEN result = 'T' THEN 1 ELSE 0 END) AS tie_count,
+              COALESCE(SUM(CASE WHEN status = 'settled' THEN pnl ELSE 0 END), 0) AS total_pnl
+            FROM ensemble_majority_hourly_bets
+            WHERE {' AND '.join(filters)}""",
+            tuple(params),
+        ).fetchone()
+        return {
+            "total_count": int(row["total_count"] or 0),
+            "settled_count": int(row["settled_count"] or 0),
+            "pending_count": int(row["pending_count"] or 0),
+            "win_count": int(row["win_count"] or 0),
+            "loss_count": int(row["loss_count"] or 0),
+            "tie_count": int(row["tie_count"] or 0),
+            "total_pnl": float(row["total_pnl"] or 0),
+        }
+
+    def ensemble_majority_hourly_slot_keys(self, session_date: str) -> set[tuple[str, str]]:
+        rows = self.conn.execute(
+            """SELECT session_date, session_window
+            FROM ensemble_majority_hourly_bets
+            WHERE session_date=?""",
+            (session_date,),
+        ).fetchall()
+        return {(str(row["session_date"]), str(row["session_window"])) for row in rows}
+
+    def ensemble_majority_hourly_slot_used(self, session_date: str, session_window: str) -> bool:
+        row = self.conn.execute(
+            """SELECT 1 FROM ensemble_majority_hourly_bets
+            WHERE session_date=? AND session_window=? LIMIT 1""",
+            (session_date, session_window),
+        ).fetchone()
+        return row is not None
+
+    def save_adaptive_regime_hourly_bet(
+        self,
+        *,
+        session_date: str,
+        session_window: str,
+        created_at: str,
+        table_name: str,
+        side: str,
+        stake: float,
+        signal_fingerprint: str,
+        confidence: float,
+    ) -> int | None:
+        if (
+            not session_date
+            or not session_window
+            or not created_at
+            or not table_name
+            or side not in {"B", "P"}
+            or stake <= 0
+            or confidence < 0.50
+        ):
+            return None
+        try:
+            call_dt = datetime.fromisoformat(created_at)
+        except Exception:
+            call_dt = None
+        with self.conn:
+            self.settle_stale_adaptive_regime_hourly_bets(now_dt=call_dt)
+            if self.pending_adaptive_regime_hourly_row() is not None:
+                return None
+            if self.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            ) is not None:
+                return None
+            cursor = self.conn.execute(
+                """INSERT OR IGNORE INTO adaptive_regime_hourly_bets
+                (session_date, session_window, created_at, table_name, strategy_id,
+                 side, stake, signal_fingerprint, status, confidence)
+                VALUES (?, ?, ?, ?, 'adaptive_regime', ?, ?, ?, 'pending', ?)""",
+                (
+                    session_date,
+                    session_window,
+                    created_at,
+                    table_name,
+                    side,
+                    stake,
+                    signal_fingerprint,
+                    confidence,
+                ),
+            )
+            if cursor.rowcount <= 0:
+                return None
+            return int(cursor.lastrowid)
+
+    def settle_adaptive_regime_hourly_bet(
+        self,
+        *,
+        bet_id: int,
+        settled_at: str,
+        outcome: str,
+        result: str,
+        pnl: float,
+    ) -> bool:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE adaptive_regime_hourly_bets
+                SET settled_at=?, status='settled', outcome=?, result=?, pnl=?
+                WHERE id=? AND status='pending'""",
+                (settled_at, outcome, result, pnl, bet_id),
+            )
+            return cursor.rowcount > 0
+
+    def settle_stale_adaptive_regime_hourly_bets(
+        self,
+        *,
+        max_age_seconds: float = 180.0,
+        banker_commission: float = 0.05,
+        now_dt: datetime | None = None,
+    ) -> list[int]:
+        if now_dt is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+        now_iso = now_dt.isoformat()
+
+        pending_rows = self.conn.execute(
+            """SELECT * FROM adaptive_regime_hourly_bets
+            WHERE status='pending'
+            ORDER BY id ASC"""
+        ).fetchall()
+
+        if not pending_rows:
+            return []
+
+        settled_ids: list[int] = []
+        for row in pending_rows:
+            bet_id = int(row["id"])
+            table_name = str(row["table_name"])
+            signal_fingerprint = str(row["signal_fingerprint"])
+            side = str(row["side"])
+            stake = float(row["stake"])
+            created_at_str = str(row["created_at"])
+
+            result_event = self.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            )
+            if result_event is not None:
+                outcome = str(result_event["outcome"])
+                if outcome == "T":
+                    result, pnl = "T", 0.0
+                elif outcome != side:
+                    result, pnl = "L", round(-stake, 2)
+                else:
+                    multiplier = 1.0 - banker_commission if side == "B" else 1.0
+                    result, pnl = "W", round(stake * multiplier, 2)
+                if self.settle_adaptive_regime_hourly_bet(
+                    bet_id=bet_id,
+                    settled_at=str(result_event["observed_at"]),
+                    outcome=outcome,
+                    result=result,
+                    pnl=pnl,
+                ):
+                    settled_ids.append(bet_id)
+                continue
+
+            if self.is_shoe_finished_after_signal(
+                table_name=table_name,
+                signal_fingerprint=signal_fingerprint,
+            ):
+                if self.settle_adaptive_regime_hourly_bet(
+                    bet_id=bet_id,
+                    settled_at=now_iso,
+                    outcome="VOID",
+                    result="T",
+                    pnl=0.0,
+                ):
+                    settled_ids.append(bet_id)
+                continue
+
+            try:
+                created_dt = datetime.fromisoformat(created_at_str)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                age = (now_dt - created_dt).total_seconds()
+            except Exception:
+                age = max_age_seconds + 1.0
+
+            if age >= max_age_seconds:
+                if self.settle_adaptive_regime_hourly_bet(
+                    bet_id=bet_id,
+                    settled_at=now_iso,
+                    outcome="TIMEOUT",
+                    result="T",
+                    pnl=0.0,
+                ):
+                    settled_ids.append(bet_id)
+
+        return settled_ids
+
+    def pending_adaptive_regime_hourly_row(
+        self,
+        table_name: str | None = None,
+    ) -> sqlite3.Row | None:
+        table_filter = " AND table_name=?" if table_name is not None else ""
+        params: tuple[object, ...] = (table_name,) if table_name is not None else ()
+        return self.conn.execute(
+            f"""SELECT * FROM adaptive_regime_hourly_bets
+            WHERE status='pending'{table_filter}
+            ORDER BY id DESC LIMIT 1""",
+            params,
+        ).fetchone()
+
+    def adaptive_regime_hourly_rows(
+        self,
+        session_date: str | None = None,
+        session_window: str | None = None,
+        *,
+        limit: int | None = None,
+    ) -> list[sqlite3.Row]:
+        filters = [
+            """NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'adaptive_regime_hourly_bets')
+                AND COALESCE(adaptive_regime_hourly_bets.settled_at, adaptive_regime_hourly_bets.created_at) >= dq.started_at
+                AND COALESCE(adaptive_regime_hourly_bets.settled_at, adaptive_regime_hourly_bets.created_at) <= dq.ended_at
+            )"""
+        ]
+        params: list[object] = []
+        if session_date:
+            filters.append("session_date = ?")
+            params.append(session_date)
+        if session_window:
+            filters.append("session_window = ?")
+            params.append(session_window)
+        order_clause = " ORDER BY id" if session_date else " ORDER BY id DESC"
+        limit_clause = " LIMIT ?" if limit is not None else ""
+        if limit is not None:
+            params.append(max(0, int(limit)))
+        return self.conn.execute(
+            f"""SELECT * FROM adaptive_regime_hourly_bets
+            WHERE {' AND '.join(filters)}{order_clause}{limit_clause}""",
+            tuple(params),
+        ).fetchall()
+
+    def adaptive_regime_hourly_dates(self, *, limit: int = 366) -> list[str]:
+        rows = self.conn.execute(
+            """SELECT session_date
+            FROM adaptive_regime_hourly_bets
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'adaptive_regime_hourly_bets')
+                AND COALESCE(adaptive_regime_hourly_bets.settled_at, adaptive_regime_hourly_bets.created_at) >= dq.started_at
+                AND COALESCE(adaptive_regime_hourly_bets.settled_at, adaptive_regime_hourly_bets.created_at) <= dq.ended_at
+            )
+            GROUP BY session_date
+            ORDER BY session_date DESC
+            LIMIT ?""",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [str(row["session_date"]) for row in rows]
+
+    def adaptive_regime_hourly_summary(
+        self,
+        session_date: str | None = None,
+        session_window: str | None = None,
+    ) -> dict[str, int | float]:
+        filters = [
+            """NOT EXISTS (
+              SELECT 1
+              FROM data_quality_exclusions AS dq
+              WHERE dq.scope IN ('all', 'adaptive_regime_hourly_bets')
+                AND COALESCE(adaptive_regime_hourly_bets.settled_at, adaptive_regime_hourly_bets.created_at) >= dq.started_at
+                AND COALESCE(adaptive_regime_hourly_bets.settled_at, adaptive_regime_hourly_bets.created_at) <= dq.ended_at
+            )"""
+        ]
+        params: list[object] = []
+        if session_date:
+            filters.append("session_date = ?")
+            params.append(session_date)
+        if session_window:
+            filters.append("session_window = ?")
+            params.append(session_window)
+        row = self.conn.execute(
+            f"""SELECT
+              COUNT(*) AS total_count,
+              SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) AS settled_count,
+              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+              SUM(CASE WHEN result = 'W' THEN 1 ELSE 0 END) AS win_count,
+              SUM(CASE WHEN result = 'L' THEN 1 ELSE 0 END) AS loss_count,
+              SUM(CASE WHEN result = 'T' THEN 1 ELSE 0 END) AS tie_count,
+              COALESCE(SUM(CASE WHEN status = 'settled' THEN pnl ELSE 0 END), 0) AS total_pnl
+            FROM adaptive_regime_hourly_bets
+            WHERE {' AND '.join(filters)}""",
+            tuple(params),
+        ).fetchone()
+        return {
+            "total_count": int(row["total_count"] or 0),
+            "settled_count": int(row["settled_count"] or 0),
+            "pending_count": int(row["pending_count"] or 0),
+            "win_count": int(row["win_count"] or 0),
+            "loss_count": int(row["loss_count"] or 0),
+            "tie_count": int(row["tie_count"] or 0),
+            "total_pnl": float(row["total_pnl"] or 0),
+        }
+
+    def adaptive_regime_hourly_slot_keys(self, session_date: str) -> set[tuple[str, str]]:
+        rows = self.conn.execute(
+            """SELECT session_date, session_window
+            FROM adaptive_regime_hourly_bets
+            WHERE session_date=?""",
+            (session_date,),
+        ).fetchall()
+        return {(str(row["session_date"]), str(row["session_window"])) for row in rows}
+
+    def adaptive_regime_hourly_slot_used(self, session_date: str, session_window: str) -> bool:
+        row = self.conn.execute(
+            """SELECT 1 FROM adaptive_regime_hourly_bets
+            WHERE session_date=? AND session_window=? LIMIT 1""",
+            (session_date, session_window),
+        ).fetchone()
+        return row is not None
 
     def save_stable_pair_bet(
         self,
@@ -908,10 +2369,12 @@ class WorkbenchStore:
             "total_pnl": float(row["total_pnl"] or 0),
         }
 
-    def pending_daily_experiment_row(self, table_name: str) -> sqlite3.Row | None:
+    def pending_daily_experiment_row(self, table_name: str | None = None) -> sqlite3.Row | None:
+        table_filter = " AND table_name=?" if table_name is not None else ""
+        params: tuple[object, ...] = (table_name,) if table_name is not None else ()
         return self.conn.execute(
-            """SELECT * FROM daily_experiment_bets
-            WHERE table_name=? AND status='pending'
+            f"""SELECT * FROM daily_experiment_bets
+            WHERE status='pending'{table_filter}
               AND NOT EXISTS (
                 SELECT 1
                 FROM data_quality_exclusions AS dq
@@ -920,7 +2383,7 @@ class WorkbenchStore:
                   AND daily_experiment_bets.created_at <= dq.ended_at
               )
             ORDER BY id DESC LIMIT 1""",
-            (table_name,),
+            params,
         ).fetchone()
 
     def next_round_after_fingerprint(
@@ -929,6 +2392,48 @@ class WorkbenchStore:
         table_name: str,
         signal_fingerprint: str,
     ) -> sqlite3.Row | None:
+        # 1. Exact adjacent round in same shoe
+        row = self.exact_next_round_after_fingerprint(
+            table_name=table_name,
+            signal_fingerprint=signal_fingerprint,
+        )
+        if row is not None:
+            return row
+
+        # 2. Next observed round in same shoe (handles skipped round numbers, e.g. 16 -> 18)
+        return self.conn.execute(
+            """SELECT next_round.*
+            FROM rounds AS signal_round
+            JOIN rounds AS next_round
+              ON next_round.table_name = signal_round.table_name
+             AND next_round.shoe IS signal_round.shoe
+             AND next_round.round_no > signal_round.round_no
+            WHERE signal_round.table_name = ?
+              AND signal_round.fingerprint = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM data_quality_exclusions AS dq
+                WHERE dq.scope IN ('all', 'rounds')
+                  AND signal_round.observed_at >= dq.started_at
+                  AND signal_round.observed_at <= dq.ended_at
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM data_quality_exclusions AS dq
+                WHERE dq.scope IN ('all', 'rounds')
+                  AND next_round.observed_at >= dq.started_at
+                  AND next_round.observed_at <= dq.ended_at
+              )
+            ORDER BY next_round.round_no ASC, next_round.observed_at ASC
+            LIMIT 1""",
+            (table_name, signal_fingerprint),
+        ).fetchone()
+
+    def exact_next_round_after_fingerprint(
+        self,
+        *,
+        table_name: str,
+        signal_fingerprint: str,
+    ) -> sqlite3.Row | None:
+        """Return only round N+1 from the same table and shoe."""
         return self.conn.execute(
             """SELECT next_round.*
             FROM rounds AS signal_round
@@ -954,6 +2459,27 @@ class WorkbenchStore:
             LIMIT 1""",
             (table_name, signal_fingerprint),
         ).fetchone()
+
+    def is_shoe_finished_after_signal(
+        self,
+        *,
+        table_name: str,
+        signal_fingerprint: str,
+    ) -> bool:
+        """Check if the shoe for this signal has ended (newer shoe has started on this table)."""
+        row = self.conn.execute(
+            """SELECT 1
+            FROM rounds AS signal_round
+            JOIN rounds AS newer_round
+              ON newer_round.table_name = signal_round.table_name
+             AND newer_round.shoe IS NOT signal_round.shoe
+             AND newer_round.observed_at > signal_round.observed_at
+            WHERE signal_round.table_name = ?
+              AND signal_round.fingerprint = ?
+            LIMIT 1""",
+            (table_name, signal_fingerprint),
+        ).fetchone()
+        return row is not None
 
     def save_latency_sample(self, sample: LatencySample) -> None:
         with self.conn:
@@ -1019,6 +2545,9 @@ class WorkbenchStore:
             "signals",
             "paper_bets",
             "daily_experiment_bets",
+            "run_length_hourly_bets",
+            "ensemble_majority_hourly_bets",
+            "adaptive_regime_hourly_bets",
             "stable_pair_bets",
         }:
             raise ValueError(f"Unsupported data quality exclusion scope: {scope}")
@@ -1149,6 +2678,127 @@ class WorkbenchStore:
             "max_loss": max_loss,
         }
 
+    def ml_pass_recent_wl_summary(
+        self,
+        table_name: str,
+        history_limit: int = 30,
+        *,
+        current_shoe: str | int | None = None,
+    ) -> dict[str, str]:
+        """Return only current-shoe ML W/L values needed by the live dashboard.
+
+        Unlike ``ml_pass_wl_summary``, this path never scans lifetime rows or
+        calculates historical maximum streaks.  The fingerprint range is
+        bounded to the table's current shoe so it can use
+        ``idx_paper_table_fingerprint``.
+        """
+        if current_shoe is None:
+            current_shoe_row = self.conn.execute(
+                """
+                SELECT shoe
+                FROM rounds AS r
+                WHERE table_name = ? AND shoe IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM data_quality_exclusions AS dq
+                    WHERE dq.scope IN ('all', 'rounds')
+                      AND r.observed_at >= dq.started_at
+                      AND r.observed_at <= dq.ended_at
+                  )
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (table_name,),
+            ).fetchone()
+            if current_shoe_row is None or current_shoe_row[0] is None:
+                return {"history": "-", "current": "-"}
+            current_shoe = current_shoe_row[0]
+
+        fingerprint_prefix = f"{table_name}|{current_shoe}|"
+        rows = self.conn.execute(
+            """
+            SELECT
+              id,
+              created_at,
+              settled_at,
+              table_name,
+              strategy_id,
+              side,
+              stake,
+              signal_fingerprint,
+              outcome,
+              pnl_delta,
+              reason
+            FROM paper_bets
+            WHERE table_name = ?
+              AND signal_fingerprint >= ?
+              AND signal_fingerprint < ?
+              AND status = 'settled'
+              AND reason LIKE 'ML pass:%'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM data_quality_exclusions AS dq
+                WHERE dq.scope IN ('all', 'paper_bets')
+                  AND COALESCE(paper_bets.settled_at, paper_bets.created_at) >= dq.started_at
+                  AND COALESCE(paper_bets.settled_at, paper_bets.created_at) <= dq.ended_at
+              )
+            ORDER BY COALESCE(settled_at, created_at), created_at, id
+            """,
+            (table_name, fingerprint_prefix, f"{fingerprint_prefix}\uffff"),
+        ).fetchall()
+        values: list[str] = []
+        for row in _select_best_ml_pass_rows(rows):
+            delta = float(row["pnl_delta"] or 0)
+            if delta > 0:
+                values.append("W")
+            elif delta < 0:
+                values.append("L")
+        if not values:
+            return {"history": "-", "current": "-"}
+
+        current = values[-1]
+        current_count = 0
+        for value in reversed(values):
+            if value != current:
+                break
+            current_count += 1
+        history_values = values[-history_limit:] if history_limit > 0 else values
+        return {
+            "history": " ".join(history_values),
+            "current": f"{current}{current_count}",
+        }
+
+    def dashboard_ml_pass_snapshot(
+        self,
+        current_shoes: Mapping[str, str | int | None],
+        history_limit: int = 30,
+    ) -> dict[str, object]:
+        """Load dashboard-only ML statistics through a dedicated read connection."""
+        shoe_by_table = {
+            str(table_name): shoe
+            for table_name, shoe in current_shoes.items()
+            if str(table_name)
+        }
+        connection = sqlite3.connect(f"{self.sqlite_path.resolve().as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        reader = object.__new__(WorkbenchStore)
+        reader.sqlite_path = self.sqlite_path
+        reader.conn = connection
+        reader.duck = None
+        try:
+            summaries = {
+                table_name: reader.ml_pass_recent_wl_summary(
+                    table_name,
+                    history_limit,
+                    current_shoe=shoe,
+                )
+                for table_name, shoe in shoe_by_table.items()
+            }
+            totals = reader.ml_pass_totals()
+        finally:
+            connection.close()
+        return {"summaries": summaries, "totals": totals}
+
     def ml_pass_totals(self) -> dict[str, float | int]:
         rows = self._selected_ml_pass_rows()
         return {
@@ -1261,25 +2911,25 @@ class WorkbenchStore:
                 (table_name,),
             ).fetchone()
             if current_shoe_row is not None and current_shoe_row[0] is not None:
-                shoe_by_fingerprint = {
-                    str(row[0]): str(row[1])
+                current_shoe = str(current_shoe_row[0])
+                shoe_fps = {
+                    str(row[0])
                     for row in self.conn.execute(
-                        """SELECT fingerprint, shoe FROM rounds AS r
-                        WHERE table_name = ? AND shoe IS NOT NULL
+                        """SELECT fingerprint FROM rounds AS r
+                        WHERE table_name = ? AND shoe = ?
                           AND NOT EXISTS (
                             SELECT 1 FROM data_quality_exclusions AS dq
                             WHERE dq.scope IN ('all', 'rounds')
                               AND r.observed_at >= dq.started_at
                               AND r.observed_at <= dq.ended_at
                           )""",
-                        (table_name,),
+                        (table_name, current_shoe_row[0]),
                     ).fetchall()
                 }
-                current_shoe = str(current_shoe_row[0])
                 rows = [
                     row
                     for row in rows
-                    if shoe_by_fingerprint.get(str(row["signal_fingerprint"])) == current_shoe
+                    if str(row["signal_fingerprint"]) in shoe_fps
                 ]
         return _select_best_ml_pass_rows(rows)
 
@@ -1660,87 +3310,177 @@ class DuckDbMirror:
             return
         try:
             self.conn.execute("BEGIN TRANSACTION")
-            for table in (
-                "data_quality_exclusions",
-                "latency_samples",
-                "paper_bets",
-                "signals",
-                "rounds",
-                "tables",
-            ):
-                self.conn.execute(f"DELETE FROM {table}")
 
-            self._executemany(
-                "INSERT INTO tables VALUES (?, ?, ?, ?)",
-                [tuple(row) for row in sqlite_conn.execute("SELECT table_name, table_id, last_seen, round_count FROM tables")],
-            )
-            self._executemany(
-                "INSERT INTO rounds VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    tuple(row)
-                    for row in sqlite_conn.execute(
-                        """
-                        SELECT fingerprint, table_name, table_id, shoe, round_no, outcome, source, observed_at
-                        FROM rounds
-                        ORDER BY observed_at, table_name, shoe, round_no
-                        """
+            # 1. tables
+            sqlite_tables_count = sqlite_conn.execute("SELECT COUNT(*) FROM tables").fetchone()[0]
+            duck_tables_count = self.conn.execute("SELECT COUNT(*) FROM tables").fetchone()[0]
+            if duck_tables_count != sqlite_tables_count:
+                self.conn.execute("DELETE FROM tables")
+                self._executemany(
+                    "INSERT INTO tables VALUES (?, ?, ?, ?)",
+                    [tuple(row) for row in sqlite_conn.execute("SELECT table_name, table_id, last_seen, round_count FROM tables")],
+                )
+
+            # 2. data_quality_exclusions
+            sqlite_dq_count = sqlite_conn.execute("SELECT COUNT(*) FROM data_quality_exclusions").fetchone()[0]
+            duck_dq_count = self.conn.execute("SELECT COUNT(*) FROM data_quality_exclusions").fetchone()[0]
+            if duck_dq_count != sqlite_dq_count:
+                self.conn.execute("DELETE FROM data_quality_exclusions")
+                self._executemany(
+                    "INSERT INTO data_quality_exclusions VALUES (?, ?, ?, ?, ?, ?)",
+                    [tuple(row) for row in sqlite_conn.execute("SELECT id, started_at, ended_at, scope, reason, created_at FROM data_quality_exclusions ORDER BY id")],
+                )
+
+            # 3. rounds
+            sqlite_rounds_count = sqlite_conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0]
+            duck_rounds_count = self.conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0]
+            if duck_rounds_count == 0 and sqlite_rounds_count > 0:
+                self._executemany(
+                    "INSERT INTO rounds VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        tuple(row)
+                        for row in sqlite_conn.execute(
+                            """
+                            SELECT fingerprint, table_name, table_id, shoe, round_no, outcome, source, observed_at
+                            FROM rounds
+                            ORDER BY observed_at, table_name, shoe, round_no
+                            """
+                        )
+                    ],
+                )
+            elif duck_rounds_count < sqlite_rounds_count:
+                max_observed = self.conn.execute("SELECT MAX(observed_at) FROM rounds").fetchone()[0]
+                if max_observed:
+                    missing_rows = [
+                        tuple(row)
+                        for row in sqlite_conn.execute(
+                            """
+                            SELECT fingerprint, table_name, table_id, shoe, round_no, outcome, source, observed_at
+                            FROM rounds
+                            WHERE observed_at >= ?
+                            """,
+                            (max_observed,),
+                        )
+                    ]
+                    self.conn.executemany(
+                        "INSERT OR IGNORE INTO rounds VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        missing_rows,
                     )
-                ],
-            )
-            self._executemany(
-                "INSERT INTO signals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    tuple(row)
-                    for row in sqlite_conn.execute(
-                        """
-                        SELECT created_at, table_name, strategy_id, action, side, confidence, reason,
-                               features_json, round_fingerprint
-                        FROM signals
-                        ORDER BY created_at
-                        """
+
+            # 4. signals
+            sqlite_sig_count = sqlite_conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+            duck_sig_count = self.conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+            if duck_sig_count == 0 and sqlite_sig_count > 0:
+                self._executemany(
+                    "INSERT INTO signals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        tuple(row)
+                        for row in sqlite_conn.execute(
+                            """
+                            SELECT created_at, table_name, strategy_id, action, side, confidence, reason,
+                                   features_json, round_fingerprint
+                            FROM signals
+                            ORDER BY created_at
+                            """
+                        )
+                    ],
+                )
+            elif duck_sig_count < sqlite_sig_count:
+                max_created = self.conn.execute("SELECT MAX(created_at) FROM signals").fetchone()[0]
+                if max_created:
+                    missing_rows = [
+                        tuple(row)
+                        for row in sqlite_conn.execute(
+                            """
+                            SELECT created_at, table_name, strategy_id, action, side, confidence, reason,
+                                   features_json, round_fingerprint
+                            FROM signals
+                            WHERE created_at > ?
+                            ORDER BY created_at
+                            """,
+                            (max_created,),
+                        )
+                    ]
+                    self._executemany(
+                        "INSERT INTO signals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        missing_rows,
                     )
-                ],
-            )
-            self._executemany(
-                "INSERT INTO paper_bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
+
+            # 5. paper_bets
+            sqlite_pb_count = sqlite_conn.execute("SELECT COUNT(*) FROM paper_bets").fetchone()[0]
+            duck_pb_count = self.conn.execute("SELECT COUNT(*) FROM paper_bets").fetchone()[0]
+            if duck_pb_count == 0 and sqlite_pb_count > 0:
+                self._executemany(
+                    "INSERT INTO paper_bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        tuple(row)
+                        for row in sqlite_conn.execute(
+                            """
+                            SELECT created_at, settled_at, table_name, strategy_id, side, stake, signal_fingerprint,
+                                   status, outcome, pnl_delta, pnl_after, reason
+                            FROM paper_bets
+                            ORDER BY COALESCE(settled_at, created_at), created_at
+                            """
+                        )
+                    ],
+                )
+            elif duck_pb_count != sqlite_pb_count:
+                self.conn.execute("DELETE FROM paper_bets")
+                self._executemany(
+                    "INSERT INTO paper_bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        tuple(row)
+                        for row in sqlite_conn.execute(
+                            """
+                            SELECT created_at, settled_at, table_name, strategy_id, side, stake, signal_fingerprint,
+                                   status, outcome, pnl_delta, pnl_after, reason
+                            FROM paper_bets
+                            ORDER BY COALESCE(settled_at, created_at), created_at
+                            """
+                        )
+                    ],
+                )
+
+            # 6. latency_samples
+            sqlite_lat_count = sqlite_conn.execute("SELECT COUNT(*) FROM latency_samples").fetchone()[0]
+            duck_lat_count = self.conn.execute("SELECT COUNT(*) FROM latency_samples").fetchone()[0]
+            if duck_lat_count == 0 and sqlite_lat_count > 0:
+                self._executemany(
+                    "INSERT INTO latency_samples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        tuple(row)
+                        for row in sqlite_conn.execute(
+                            """
+                            SELECT created_at, table_name, source, current_round_no, observed_rounds,
+                                   known_missing_rounds, monitor_seen_at, app_received_at, engine_done_at,
+                                   ui_refresh_at, queue_delay_ms, engine_ms, ui_delay_ms, total_ms,
+                                   signal_count, actionable_count, pending_count
+                            FROM latency_samples
+                            ORDER BY id
+                            """
+                        )
+                    ],
+                )
+            elif duck_lat_count < sqlite_lat_count:
+                missing_rows = [
                     tuple(row)
                     for row in sqlite_conn.execute(
-                        """
-                        SELECT created_at, settled_at, table_name, strategy_id, side, stake, signal_fingerprint,
-                               status, outcome, pnl_delta, pnl_after, reason
-                        FROM paper_bets
-                        ORDER BY COALESCE(settled_at, created_at), created_at
-                        """
-                    )
-                ],
-            )
-            self._executemany(
-                "INSERT INTO latency_samples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    tuple(row)
-                    for row in sqlite_conn.execute(
-                        """
+                        f"""
                         SELECT created_at, table_name, source, current_round_no, observed_rounds,
                                known_missing_rounds, monitor_seen_at, app_received_at, engine_done_at,
                                ui_refresh_at, queue_delay_ms, engine_ms, ui_delay_ms, total_ms,
                                signal_count, actionable_count, pending_count
                         FROM latency_samples
                         ORDER BY id
+                        LIMIT -1 OFFSET {duck_lat_count}
                         """
                     )
-                ],
-            )
-            self._executemany(
-                "INSERT INTO data_quality_exclusions VALUES (?, ?, ?, ?, ?, ?)",
-                [
-                    tuple(row)
-                    for row in sqlite_conn.execute(
-                        """SELECT id, started_at, ended_at, scope, reason, created_at
-                        FROM data_quality_exclusions ORDER BY id"""
-                    )
-                ],
-            )
+                ]
+                self._executemany(
+                    "INSERT INTO latency_samples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    missing_rows,
+                )
+
             self.conn.execute("COMMIT")
         except Exception as exc:
             with contextlib.suppress(Exception):
@@ -1864,7 +3604,8 @@ class DuckDbMirror:
             try:
                 sqlite_count = sqlite_conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 duck_count = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            except Exception:
+            except Exception as exc:
+                logger.debug("Table count verification failed for %s: %s", table, exc)
                 return False
             if sqlite_count != duck_count:
                 return False

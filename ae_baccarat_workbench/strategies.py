@@ -7,33 +7,33 @@ from .models import BetSide, Outcome, StrategyAction, StrategySignal, TableSnaps
 
 
 def side_from_outcome(outcome: Outcome) -> BetSide | None:
-    if outcome is Outcome.BANKER:
+    if outcome == Outcome.BANKER:
         return BetSide.BANKER
-    if outcome is Outcome.PLAYER:
+    if outcome == Outcome.PLAYER:
         return BetSide.PLAYER
     return None
 
 
 def opposite_side(side: BetSide) -> BetSide:
-    return BetSide.PLAYER if side is BetSide.BANKER else BetSide.BANKER
+    return BetSide.PLAYER if side == BetSide.BANKER else BetSide.BANKER
 
 
 def signs_from_outcomes(outcomes: list[Outcome]) -> list[str]:
-    non_tie = [o for o in outcomes if o is not Outcome.TIE]
+    non_tie = [o for o in outcomes if o != Outcome.TIE]
     signs: list[str] = []
     for prev, current in zip(non_tie, non_tie[1:]):
-        signs.append("-" if prev is current else "+")
+        signs.append("-" if prev == current else "+")
     return signs
 
 
 def current_run_length(outcomes: list[Outcome]) -> int:
-    non_tie = [o for o in outcomes if o is not Outcome.TIE]
+    non_tie = [o for o in outcomes if o != Outcome.TIE]
     if not non_tie:
         return 0
     last = non_tie[-1]
     length = 0
     for value in reversed(non_tie):
-        if value is last:
+        if value == last:
             length += 1
         else:
             break
@@ -199,8 +199,8 @@ class ShoeProfileStrategy(BaseStrategy):
         bp = context.bp_outcomes
         if len(bp) < 18:
             return self.skip(context, "Cần ít nhất 18 tay B/P để phân loại shoe")
-        banker = sum(1 for outcome in bp if outcome is Outcome.BANKER)
-        player = sum(1 for outcome in bp if outcome is Outcome.PLAYER)
+        banker = sum(1 for outcome in bp if outcome == Outcome.BANKER)
+        player = sum(1 for outcome in bp if outcome == Outcome.PLAYER)
         total = banker + player
         banker_rate = banker / total if total else 0.0
         player_rate = player / total if total else 0.0
@@ -294,7 +294,171 @@ def default_atomic_strategies() -> list[BetStrategy]:
     ]
 
 
+def calculate_chop_rate(outcomes: list[Outcome], window_size: int = 15) -> float:
+    non_tie = [o for o in outcomes if o != Outcome.TIE]
+    if len(non_tie) < 2:
+        return 0.5
+    recent = non_tie[-window_size:]
+    if len(recent) < 2:
+        return 0.5
+    chops = sum(1 for prev, curr in zip(recent, recent[1:]) if prev != curr)
+    return chops / (len(recent) - 1)
+
+
+def detect_ping_pong_pattern(outcomes: list[Outcome]) -> BetSide | None:
+    non_tie = [o for o in outcomes if o != Outcome.TIE]
+    if len(non_tie) < 3:
+        return None
+    last3 = non_tie[-3:]
+    if last3 == [Outcome.BANKER, Outcome.PLAYER, Outcome.BANKER]:
+        return BetSide.PLAYER
+    if last3 == [Outcome.PLAYER, Outcome.BANKER, Outcome.PLAYER]:
+        return BetSide.BANKER
+    return None
+
+
+def detect_double_pair_pattern(outcomes: list[Outcome]) -> BetSide | None:
+    non_tie = [o for o in outcomes if o != Outcome.TIE]
+    if len(non_tie) < 3:
+        return None
+    last3 = non_tie[-3:]
+    if last3 == [Outcome.BANKER, Outcome.BANKER, Outcome.PLAYER]:
+        return BetSide.PLAYER
+    if last3 == [Outcome.PLAYER, Outcome.PLAYER, Outcome.BANKER]:
+        return BetSide.BANKER
+    if len(non_tie) >= 4:
+        last4 = non_tie[-4:]
+        if last4 == [Outcome.BANKER, Outcome.BANKER, Outcome.PLAYER, Outcome.PLAYER]:
+            return BetSide.BANKER
+        if last4 == [Outcome.PLAYER, Outcome.PLAYER, Outcome.BANKER, Outcome.BANKER]:
+            return BetSide.PLAYER
+    return None
+
+
+def detect_anti_banker_3(outcomes: list[Outcome]) -> BetSide | None:
+    non_tie = [o for o in outcomes if o != Outcome.TIE]
+    if len(non_tie) < 3:
+        return None
+    last3 = non_tie[-3:]
+    if last3 == [Outcome.BANKER, Outcome.BANKER, Outcome.BANKER]:
+        if len(non_tie) >= 4 and non_tie[-4] == Outcome.BANKER:
+            return None
+        return BetSide.PLAYER
+    return None
+
+
+def detect_late_run_pattern(outcomes: list[Outcome]) -> tuple[BetSide | None, int]:
+    non_tie = [o for o in outcomes if o != Outcome.TIE]
+    if not non_tie:
+        return None, 0
+    run = current_run_length(outcomes)
+    if run < 4:
+        return None, run
+    latest = side_from_outcome(non_tie[-1])
+    return latest, run
+
+
+class AdaptiveRegimeStrategy(BaseStrategy):
+    strategy_id = "adaptive_regime"
+    name = "Đa cầu thích ứng"
+
+    def evaluate(self, context: StrategyContext) -> StrategySignal:
+        bp = context.bp_outcomes
+        if len(bp) < 15:
+            return self.skip(context, "Cần tối thiểu 15 ván B/P để phân loại trạng thái bàn")
+        chop_rate = calculate_chop_rate(bp, window_size=15)
+        run = current_run_length(context.outcomes)
+
+        # Pha Nhảy / Chop Mode: chop_rate >= 0.55
+        if chop_rate >= 0.55:
+            # 1. Kiểm tra Cầu 1-1
+            pp_side = detect_ping_pong_pattern(bp)
+            if pp_side is not None:
+                confidence = 0.55
+                return self.bet(
+                    context,
+                    pp_side,
+                    confidence,
+                    f"Pha Nhảy ({chop_rate:.0%}): Cầu nhảy 1-1 -> Đánh {pp_side.vi_label}",
+                    regime_mode="chop",
+                    road_pattern="ping_pong",
+                    chop_rate=round(chop_rate, 3),
+                    run_length=run,
+                )
+
+            # 2. Kiểm tra Cầu 2-2
+            dp_side = detect_double_pair_pattern(bp)
+            if dp_side is not None:
+                confidence = 0.54
+                return self.bet(
+                    context,
+                    dp_side,
+                    confidence,
+                    f"Pha Nhảy ({chop_rate:.0%}): Cầu đôi 2-2 -> Đánh {dp_side.vi_label}",
+                    regime_mode="chop",
+                    road_pattern="double_pair",
+                    chop_rate=round(chop_rate, 3),
+                    run_length=run,
+                )
+
+            # 3. Kiểm tra Bẻ bệt Cái ở cây 4
+            ab_side = detect_anti_banker_3(bp)
+            if ab_side is not None and run == 3:
+                confidence = 0.545
+                return self.bet(
+                    context,
+                    ab_side,
+                    confidence,
+                    f"Pha Nhảy ({chop_rate:.0%}): B-B-B -> Bẻ sang {ab_side.vi_label} ở cây 4",
+                    regime_mode="chop",
+                    road_pattern="anti_banker_3",
+                    chop_rate=round(chop_rate, 3),
+                    run_length=run,
+                )
+
+            return self.skip(
+                context,
+                f"Pha Nhảy ({chop_rate:.0%}): Chưa xuất hiện thế cầu 1-1 / 2-2 rõ nét",
+                regime_mode="chop",
+                chop_rate=round(chop_rate, 3),
+                run_length=run,
+            )
+
+        # Pha Bệt / Trend Mode: chop_rate <= 0.40
+        if chop_rate <= 0.40:
+            lr_side, run_len = detect_late_run_pattern(bp)
+            if lr_side is not None and run_len >= 4:
+                confidence = min(0.60, 0.53 + (run_len - 4) * 0.015)
+                return self.bet(
+                    context,
+                    lr_side,
+                    confidence,
+                    f"Pha Bệt ({chop_rate:.0%}): Bệt {run_len} tay đã qua cây 4 -> Bám tiếp {lr_side.vi_label}",
+                    regime_mode="trend",
+                    road_pattern="late_run",
+                    chop_rate=round(chop_rate, 3),
+                    run_length=run_len,
+                )
+            return self.skip(
+                context,
+                f"Pha Bệt ({chop_rate:.0%}): Run {run} tay chưa đạt chuẩn bệt muộn (cần >= 4 tay)",
+                regime_mode="trend",
+                chop_rate=round(chop_rate, 3),
+                run_length=run,
+            )
+
+        # Vùng trung tính (0.40 < chop_rate < 0.55)
+        return self.skip(
+            context,
+            f"Vùng trung tính ({chop_rate:.0%}): Chop rate 40%-55%, đứng ngoài an toàn",
+            regime_mode="neutral",
+            chop_rate=round(chop_rate, 3),
+            run_length=run,
+        )
+
+
 def default_strategies() -> list[BetStrategy]:
     atomic = default_atomic_strategies()
-    return [*atomic, EnsembleMajorityStrategy(atomic)]
+    return [*atomic, EnsembleMajorityStrategy(atomic), AdaptiveRegimeStrategy()]
+
 

@@ -2,10 +2,12 @@ import base64
 import json
 import time
 import unittest
+from types import SimpleNamespace
 
 from ae_baccarat_workbench.models import Outcome
 from ae_baccarat_workbench.monitor.cdp import (
     DOM_DATA_SCRIPT,
+    TABLE_COUNTDOWN_SCRIPT,
     AeSexyCdpMonitor,
     _cdp_body_text,
     _is_relevant_raw_target,
@@ -13,6 +15,7 @@ from ae_baccarat_workbench.monitor.cdp import (
     _looks_like_bootstrap_resource,
     _looks_interesting,
     _may_contain_text_payload,
+    _normalize_countdown_rows,
 )
 
 
@@ -118,6 +121,20 @@ class CdpMonitorTests(unittest.TestCase):
         for needle in ("roadList", "gameResults", "tableID", "tableName"):
             self.assertIn(needle, DOM_DATA_SCRIPT)
 
+    def test_countdown_rows_are_normalized_conservatively(self) -> None:
+        rows = [
+            {"table_name": "Baccarat 5", "seconds": 12},
+            {"table_name": "Baccarat C05", "seconds": 11},
+            {"table_name": "Roulette 1", "seconds": 20},
+            {"table_name": "Baccarat C06", "seconds": -1},
+        ]
+
+        self.assertEqual(
+            _normalize_countdown_rows(rows),
+            {"Baccarat C05": 11.0},
+        )
+        self.assertIn("Baccarat", TABLE_COUNTDOWN_SCRIPT)
+
     def test_bootstrap_urls_are_treated_as_possible_history_payloads(self) -> None:
         url = "https://prod.vbgames88.com/play;sid=abc/api/portals/sx~~lobby~baccarat/sessions/1/gateways/10001/init"
 
@@ -164,6 +181,28 @@ class CdpMonitorTests(unittest.TestCase):
 
 
 class CdpMonitorRefreshTests(unittest.IsolatedAsyncioTestCase):
+    async def test_collects_countdowns_from_provider_frames_only(self) -> None:
+        monitor = AeSexyCdpMonitor("http://unused", on_snapshot=lambda snapshot: None)
+        provider_frame = _FakeFrame(
+            "https://sfcdf.mex777.com/player/gamehall.jsp",
+            countdown_rows=[
+                {"table_name": "Baccarat C01", "seconds": 9},
+                {"table_name": "Baccarat C05", "seconds": 6},
+            ],
+        )
+        irrelevant_frame = _FakeFrame(
+            "https://example.com/",
+            countdown_rows=[{"table_name": "Baccarat C02", "seconds": 15}],
+        )
+        browser = SimpleNamespace(
+            contexts=[SimpleNamespace(pages=[_FakePage("https://holder/", frames=[provider_frame, irrelevant_frame])])]
+        )
+
+        saw_provider, countdowns = await monitor._collect_table_countdowns(browser)
+
+        self.assertTrue(saw_provider)
+        self.assertEqual(countdowns, {"Baccarat C01": 9.0, "Baccarat C05": 6.0})
+
     async def test_watchdog_reloads_relevant_page_after_live_silence(self) -> None:
         statuses = []
         monitor = AeSexyCdpMonitor(
@@ -227,8 +266,12 @@ class CdpMonitorRefreshTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _FakeFrame:
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, countdown_rows: list[dict] | None = None) -> None:
         self.url = url
+        self.countdown_rows = countdown_rows or []
+
+    async def evaluate(self, _script: str):
+        return self.countdown_rows
 
 
 class _FakePage:

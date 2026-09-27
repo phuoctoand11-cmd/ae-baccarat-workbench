@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import re
 import unicodedata
@@ -402,7 +403,7 @@ def _iter_base64_texts(text: str) -> Iterable[str]:
         try:
             raw = base64.b64decode(padded, altchars=b"-_", validate=False)
             decoded = raw.decode("utf-8")
-        except Exception:
+        except (binascii.Error, UnicodeDecodeError, ValueError):
             continue
         if decoded.lstrip().startswith(("{", "[")) or looks_like_ae_payload(decoded):
             yield decoded

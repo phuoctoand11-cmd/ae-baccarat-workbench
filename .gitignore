@@ -16,3 +16,7 @@ workbench.sqlite
 *.sqlite-wal
 *.sqlite-shm
 *.egg-info/
+.artifact-build/
+.artifact-backup/
+release/
+scratch/

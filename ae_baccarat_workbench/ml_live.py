@@ -142,7 +142,15 @@ class MlSignalFilter:
                 "strategy_confidence": signal.confidence,
             }
         )
-        if probability < self.threshold:
+        effective_threshold = self.threshold
+        if signal.strategy_id == "adaptive_regime":
+            if signal.side and signal.side.value == "B":
+                effective_threshold = max(self.threshold, 0.57)
+            elif signal.side and signal.side.value == "P":
+                effective_threshold = min(self.threshold, 0.525)
+
+        features.update({"effective_ml_threshold": effective_threshold})
+        if probability < effective_threshold:
             return replace(
                 signal,
                 action=StrategyAction.SKIP,
@@ -150,7 +158,7 @@ class MlSignalFilter:
                 confidence=probability,
                 reason=(
                     f"ML skip: win probability {probability:.1%} < "
-                    f"threshold {self.threshold:.1%}; base signal {signal.side.vi_label if signal.side else '-'} "
+                    f"threshold {effective_threshold:.1%}; base signal {signal.side.vi_label if signal.side else '-'} "
                     f"{signal.confidence:.1%} from {signal.strategy_id}"
                 ),
                 features=features,
@@ -158,7 +166,7 @@ class MlSignalFilter:
         return replace(
             signal,
             confidence=probability,
-            reason=f"ML pass: win probability {probability:.1%} >= threshold {self.threshold:.1%}; {signal.reason}",
+            reason=f"ML pass: win probability {probability:.1%} >= threshold {effective_threshold:.1%}; {signal.reason}",
             features=features,
         )
 
@@ -339,9 +347,9 @@ def _outcome_streak_len(shoe_rounds: list[RoundEvent], latest: RoundEvent | None
 
 def _round_counts(rounds: list[RoundEvent]) -> dict[str, int]:
     return {
-        "B": sum(1 for event in rounds if event.outcome is Outcome.BANKER),
-        "P": sum(1 for event in rounds if event.outcome is Outcome.PLAYER),
-        "T": sum(1 for event in rounds if event.outcome is Outcome.TIE),
+        "B": sum(1 for event in rounds if event.outcome == Outcome.BANKER),
+        "P": sum(1 for event in rounds if event.outcome == Outcome.PLAYER),
+        "T": sum(1 for event in rounds if event.outcome == Outcome.TIE),
     }
 
 
