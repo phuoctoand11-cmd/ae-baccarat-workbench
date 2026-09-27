@@ -2494,6 +2494,7 @@ class BaccaratWorkbenchApp:
             self._refresh_daily_tab(scores)
             self._refresh_run_length_tab()
             self._refresh_ensemble_majority_tab()
+            self._refresh_adaptive_regime_tab()
             return
 
         selected = self.notebook.select()
@@ -2508,6 +2509,8 @@ class BaccaratWorkbenchApp:
             self._refresh_run_length_tab()
         elif hasattr(self, "ensemble_majority_tab") and selected == str(self.ensemble_majority_tab):
             self._refresh_ensemble_majority_tab()
+        elif hasattr(self, "adaptive_regime_tab") and selected == str(self.adaptive_regime_tab):
+            self._refresh_adaptive_regime_tab()
 
     def _refresh_history_views(self, scores: list[Any] | None = None) -> None:
         """Refresh slower historical views only while they are visible."""
@@ -2937,7 +2940,7 @@ class BaccaratWorkbenchApp:
         elif hasattr(self, "ensemble_majority_tab") and selected == str(self.ensemble_majority_tab):
             self._refresh_ensemble_majority_tab()
         elif hasattr(self, "adaptive_regime_tab") and selected == str(self.adaptive_regime_tab):
-            self._refresh_adaptive_regime_tab()
+            self._refresh_adaptive_regime_tab(force_today=True)
 
     def _dashboard_tab_visible(self) -> bool:
         if not hasattr(self, "notebook") or not hasattr(self, "dashboard_tab"):
@@ -3369,12 +3372,21 @@ class BaccaratWorkbenchApp:
                     self._run_length_history_dirty = True
             return
         row = self._run_length_pending
+        if row is None:
+            row = self.store.pending_run_length_hourly_row(table_name)
+            if row is not None:
+                self._run_length_pending = row
         if row is None or str(row["table_name"]) != table_name:
             return
         result_event = self.store.exact_next_round_after_fingerprint(
             table_name=table_name,
             signal_fingerprint=str(row["signal_fingerprint"]),
         )
+        if result_event is None:
+            result_event = self.store.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=str(row["signal_fingerprint"]),
+            )
         settled = False
         if result_event is not None:
             outcome = str(result_event["outcome"])
@@ -3822,12 +3834,21 @@ class BaccaratWorkbenchApp:
                     self._ensemble_majority_history_dirty = True
             return
         row = self._ensemble_majority_pending
+        if row is None:
+            row = self.store.pending_ensemble_majority_hourly_row(table_name)
+            if row is not None:
+                self._ensemble_majority_pending = row
         if row is None or str(row["table_name"]) != table_name:
             return
         result_event = self.store.exact_next_round_after_fingerprint(
             table_name=table_name,
             signal_fingerprint=str(row["signal_fingerprint"]),
         )
+        if result_event is None:
+            result_event = self.store.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=str(row["signal_fingerprint"]),
+            )
         settled = False
         if result_event is not None:
             outcome = str(result_event["outcome"])
@@ -4251,12 +4272,21 @@ class BaccaratWorkbenchApp:
                     self._adaptive_regime_history_dirty = True
             return
         row = self._adaptive_regime_pending
+        if row is None:
+            row = self.store.pending_adaptive_regime_hourly_row(table_name)
+            if row is not None:
+                self._adaptive_regime_pending = row
         if row is None or str(row["table_name"]) != table_name:
             return
         result_event = self.store.exact_next_round_after_fingerprint(
             table_name=table_name,
             signal_fingerprint=str(row["signal_fingerprint"]),
         )
+        if result_event is None:
+            result_event = self.store.next_round_after_fingerprint(
+                table_name=table_name,
+                signal_fingerprint=str(row["signal_fingerprint"]),
+            )
         settled = False
         if result_event is not None:
             outcome = str(result_event["outcome"])
