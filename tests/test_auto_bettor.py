@@ -15,10 +15,12 @@ from ae_baccarat_workbench.monitor.auto_bettor import (
     LiveAutoBettor,
     extract_target_round_and_shoe,
     find_game_websocket_url,
+    invert_bet_side,
     map_stake_to_chips,
     normalize_bet_side,
     normalize_table_name,
     prepare_bet_orders,
+    resolve_bet_side,
 )
 from ae_baccarat_workbench.monitor.provider_ack import ProviderAck
 
@@ -806,3 +808,49 @@ def test_preconfirm_failure_never_calls_ack_waiter_or_confirm_stage() -> None:
         assert not any(event["stage"] == "CONFIRM_CLICKED" for event in audit_events)
 
     asyncio.run(_run())
+
+
+def test_invert_bet_side() -> None:
+    # Test auto_bettor invert_bet_side
+    assert invert_bet_side("P") == "B"
+    assert invert_bet_side("PLAYER") == "B"
+    assert invert_bet_side("Con") == "B"
+    assert invert_bet_side("B") == "P"
+    assert invert_bet_side("BANKER") == "P"
+    assert invert_bet_side("Cái") == "P"
+    assert invert_bet_side(BetSide.PLAYER) == "B"
+    assert invert_bet_side(BetSide.BANKER) == "P"
+
+
+def test_resolve_bet_side() -> None:
+    # Forward mode returns original side ("P" or "B")
+    assert resolve_bet_side("P", "forward") == "P"
+    assert resolve_bet_side("PLAYER", "forward") == "P"
+    assert resolve_bet_side(BetSide.PLAYER, "forward") == "P"
+    assert resolve_bet_side("B", "forward") == "B"
+    assert resolve_bet_side("BANKER", "forward") == "B"
+    assert resolve_bet_side(BetSide.BANKER, "forward") == "B"
+
+    # Default mode is forward
+    assert resolve_bet_side("P") == "P"
+    assert resolve_bet_side("B") == "B"
+
+    # Inverse mode flips the side
+    assert resolve_bet_side("P", "inverse") == "B"
+    assert resolve_bet_side(BetSide.PLAYER, "inverse") == "B"
+    assert resolve_bet_side("PLAYER", "inverse") == "B"
+    assert resolve_bet_side("Con", "inverse") == "B"
+
+    assert resolve_bet_side("B", "inverse") == "P"
+    assert resolve_bet_side(BetSide.BANKER, "inverse") == "P"
+    assert resolve_bet_side("BANKER", "inverse") == "P"
+    assert resolve_bet_side("Cái", "inverse") == "P"
+
+    # Variants of inverse string
+    assert resolve_bet_side("P", "nguoc") == "B"
+    assert resolve_bet_side("P", "ngược") == "B"
+    assert resolve_bet_side("P", "reverse") == "B"
+    assert resolve_bet_side("P", "Đánh Ngược") == "B"
+    assert resolve_bet_side("B", "Đánh Ngược") == "P"
+    assert resolve_bet_side("B", "nguoc") == "P"
+

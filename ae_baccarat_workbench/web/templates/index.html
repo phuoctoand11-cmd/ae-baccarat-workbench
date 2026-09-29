@@ -127,6 +127,15 @@
           </div>
         </div>
 
+        <!-- Daily Bet Mode Control -->
+        <div class="glass-card px-3 py-1.5 rounded-xl flex items-center space-x-2 border-slate-700/80">
+          <span class="text-[11px] text-slate-400 uppercase font-semibold">Chiều:</span>
+          <select id="daily-bet-mode-select" onchange="onDailyBetModeChange(this.value)" class="bg-slate-950/80 border border-slate-700 rounded-lg px-2 py-0.5 text-xs font-bold text-white focus:outline-none focus:border-emerald-500">
+            <option value="forward">Đánh Thuận</option>
+            <option value="inverse">Đánh Ngược</option>
+          </select>
+        </div>
+
         <!-- Live Auto-Bet Switch -->
         <div class="glass-card px-3 py-1.5 rounded-xl flex items-center space-x-2.5 border-slate-700/80">
           <label class="relative inline-flex items-center cursor-pointer">
@@ -351,6 +360,15 @@
               <input type="number" id="rl-stake-input" value="10" min="1" step="1" onchange="onRunLengthStakeChange(this.value)" class="w-16 bg-slate-950/80 border border-slate-700 rounded-lg px-2 py-0.5 text-xs text-center font-bold text-white focus:outline-none focus:border-amber-500 font-mono">
               <span class="text-xs font-semibold text-slate-300">điểm</span>
               <button onclick="saveRunLengthConfig()" class="ml-1 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-bold transition">Lưu</button>
+            </div>
+
+            <!-- Bet Mode Control for Run Length -->
+            <div class="flex items-center space-x-2 glass-card px-3 py-1.5 rounded-xl border-slate-700/80">
+              <span class="text-xs text-slate-400 font-semibold">Chiều:</span>
+              <select id="rl-bet-mode-select" onchange="onRunLengthBetModeChange(this.value)" class="bg-slate-950/80 border border-slate-700 rounded-lg px-2 py-0.5 text-xs font-bold text-white focus:outline-none focus:border-amber-500">
+                <option value="forward">Đánh Thuận</option>
+                <option value="inverse">Đánh Ngược</option>
+              </select>
             </div>
           </div>
         </div>
@@ -817,6 +835,13 @@
         pnlEl.className = pnl >= 0 ? 'text-lg font-extrabold font-mono text-emerald-400' : 'text-lg font-extrabold font-mono text-rose-400';
         document.getElementById('daily-bets-count-label').innerText = `${data.today_rows.length} lệnh hôm nay`;
 
+        if (data.bet_mode) {
+          const dailyModeSel = document.getElementById('daily-bet-mode-select');
+          if (dailyModeSel && document.activeElement !== dailyModeSel) {
+            dailyModeSel.value = data.bet_mode;
+          }
+        }
+
         document.getElementById('daily-stake-display').innerText = `${data.stake || 10} điểm`;
         document.getElementById('daily-mode-badge').innerText = data.autobet_enabled ? 'CƯỢC THẬT (LIVE)' : 'Paper Mô Phỏng';
         document.getElementById('daily-mode-badge').className = data.autobet_enabled ? 'text-lg font-extrabold text-emerald-400' : 'text-lg font-extrabold text-white';
@@ -1014,6 +1039,13 @@
           rlStakeInput.value = data.stake || 10;
         }
 
+        if (data.bet_mode) {
+          const rlModeSel = document.getElementById('rl-bet-mode-select');
+          if (rlModeSel && document.activeElement !== rlModeSel) {
+            rlModeSel.value = data.bet_mode;
+          }
+        }
+
         // Windows Grid
         const rlWinGrid = document.getElementById('rl-windows-grid');
         rlWinGrid.innerHTML = data.all_windows.map(w => {
@@ -1140,16 +1172,30 @@
     async function saveRunLengthConfig() {
       const selected = Array.from(document.querySelectorAll('#rl-windows-grid input[type="checkbox"]:checked')).map(cb => cb.value);
       const stake = parseFloat(document.getElementById('rl-stake-input').value) || 10;
+      const betMode = document.getElementById('rl-bet-mode-select')?.value || 'forward';
       try {
         await fetch('/api/run_length/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ windows: selected, stake: stake })
+          body: JSON.stringify({ windows: selected, stake: stake, bet_mode: betMode })
         });
         showToast("Đã lưu cấu hình Run Length >=58% thành công!", "success");
         fetchRunLength();
       } catch (e) {
         alert("Lỗi khi lưu cấu hình Run Length");
+      }
+    }
+
+    async function onRunLengthBetModeChange(val) {
+      try {
+        await fetch('/api/run_length/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bet_mode: val })
+        });
+        showToast(`Chiều đánh Run Length: ${val === 'inverse' ? 'Đánh Ngược' : 'Đánh Thuận'}`, "info");
+      } catch (e) {
+        console.error("Lỗi đổi chiều đánh run length:", e);
       }
     }
 
@@ -1231,6 +1277,19 @@
         if (currentTab === 'daily') fetchDaily();
       } catch (e) {
         console.error("Lỗi cập nhật stake:", e);
+      }
+    }
+
+    async function onDailyBetModeChange(val) {
+      try {
+        await fetch('/api/daily/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bet_mode: val })
+        });
+        showToast(`Chiều đánh Daily: ${val === 'inverse' ? 'Đánh Ngược' : 'Đánh Thuận'}`, "info");
+      } catch (e) {
+        console.error("Lỗi đổi chiều đánh daily:", e);
       }
     }
 

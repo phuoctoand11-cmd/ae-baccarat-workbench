@@ -64,6 +64,7 @@ from ..monitor.auto_bettor import (
     extract_target_round_and_shoe,
     normalize_bet_side,
     prepare_bet_orders,
+    resolve_bet_side,
 )
 from ..monitor.browser_launcher import is_cdp_port_open, launch_chrome_cdp
 from ..monitor.browser_navigator import run_browser_automation
@@ -101,12 +102,14 @@ class DailyConfigPayload(BaseModel):
     windows: list[str] | None = None
     autobet: bool | None = None
     stop_win: bool | None = None
+    bet_mode: str | None = None
 
 
 class RunLengthConfigPayload(BaseModel):
     stake: float | None = None
     windows: list[str] | None = None
     autobet: bool | None = None
+    bet_mode: str | None = None
 
 
 class EnsembleMajorityConfigPayload(BaseModel):
@@ -114,12 +117,14 @@ class EnsembleMajorityConfigPayload(BaseModel):
     windows: list[str] | None = None
     autobet: bool | None = None
     min_probability: float | None = None
+    bet_mode: str | None = None
 
 
 class AdaptiveRegimeConfigPayload(BaseModel):
     stake: float | None = None
     windows: list[str] | None = None
     autobet: bool | None = None
+    bet_mode: str | None = None
 
 
 class LoginPayload(BaseModel):
@@ -139,9 +144,11 @@ class WebState:
         self.daily_autobet_enabled: bool = bool(self.config.daily_autobet_enabled)
         self.daily_stake: float = float(getattr(self.config, "daily_stake", 10.0))
         self.daily_stop_win_enabled: bool = bool(getattr(self.config, "daily_stop_win_enabled", True))
+        self.daily_bet_mode: str = str(getattr(self.config, "daily_bet_mode", "forward"))
         self.run_length_selected_windows: set[str] = set(self.config.run_length_selected_windows)
         self.run_length_stake: float = float(getattr(self.config, "run_length_stake", 10.0))
         self.run_length_autobet_enabled: bool = bool(getattr(self.config, "run_length_autobet_enabled", False))
+        self.run_length_bet_mode: str = str(getattr(self.config, "run_length_bet_mode", "forward"))
         self._run_length_autobet_armed_today: set[str] = set()
         self._run_length_slot_cache_date: str = ""
         self._run_length_consumed_slots: set[tuple[str, str]] = set()
@@ -150,6 +157,7 @@ class WebState:
         self.ensemble_majority_stake: float = float(getattr(self.config, "ensemble_majority_stake", 10.0))
         self.ensemble_majority_autobet_enabled: bool = bool(getattr(self.config, "ensemble_majority_autobet_enabled", False))
         self.ensemble_majority_ml_min_probability: float = float(getattr(self.config, "ensemble_majority_ml_min_probability", 0.55))
+        self.ensemble_majority_bet_mode: str = str(getattr(self.config, "ensemble_majority_bet_mode", "forward"))
         self._ensemble_majority_autobet_armed_today: set[str] = set()
         self._ensemble_majority_slot_cache_date: str = ""
         self._ensemble_majority_consumed_slots: set[tuple[str, str]] = set()
@@ -157,6 +165,7 @@ class WebState:
         self.adaptive_regime_selected_windows: set[str] = set(getattr(self.config, "adaptive_regime_selected_windows", ()))
         self.adaptive_regime_stake: float = float(getattr(self.config, "adaptive_regime_stake", 10.0))
         self.adaptive_regime_autobet_enabled: bool = bool(getattr(self.config, "adaptive_regime_autobet_enabled", False))
+        self.adaptive_regime_bet_mode: str = str(getattr(self.config, "adaptive_regime_bet_mode", "forward"))
         self._adaptive_regime_autobet_armed_today: set[str] = set()
         self._adaptive_regime_slot_cache_date: str = ""
         self._adaptive_regime_consumed_slots: set[tuple[str, str]] = set()
@@ -437,7 +446,7 @@ class WebState:
                     new_orders.append(
                         BetOrder(
                             table_name=score.table_name,
-                            side=signal.side.value,
+                            side=resolve_bet_side(signal.side.value, self.daily_bet_mode),
                             stake=stake,
                             session_window=active_window,
                             order_id=order_key,
@@ -612,7 +621,10 @@ class WebState:
             new_orders.append(
                 BetOrder(
                     table_name=signal.table_name,
-                    side=signal.side.value if signal.side else "",
+                    side=resolve_bet_side(
+                        signal.side.value if signal.side else "",
+                        self.run_length_bet_mode,
+                    ),
                     stake=stake,
                     session_window=active_window,
                     order_id=order_key,
@@ -779,7 +791,10 @@ class WebState:
             new_orders.append(
                 BetOrder(
                     table_name=signal.table_name,
-                    side=signal.side.value if signal.side else "",
+                    side=resolve_bet_side(
+                        signal.side.value if signal.side else "",
+                        self.ensemble_majority_bet_mode,
+                    ),
                     stake=stake,
                     session_window=active_window,
                     order_id=order_key,
@@ -948,7 +963,10 @@ class WebState:
             new_orders.append(
                 BetOrder(
                     table_name=signal.table_name,
-                    side=signal.side.value if signal.side else "",
+                    side=resolve_bet_side(
+                        signal.side.value if signal.side else "",
+                        self.adaptive_regime_bet_mode,
+                    ),
                     stake=stake,
                     session_window=active_window,
                     order_id=order_key,
@@ -1303,6 +1321,7 @@ async def get_daily():
         "stake": state.daily_stake,
         "autobet_enabled": state.daily_autobet_enabled,
         "stop_win_enabled": state.daily_stop_win_enabled,
+        "bet_mode": state.daily_bet_mode,
         "window_has_won": window_has_won,
         "today_rows": [
             {
@@ -1335,6 +1354,9 @@ async def update_daily_config(payload: DailyConfigPayload):
     if payload.stop_win is not None:
         state.daily_stop_win_enabled = payload.stop_win
         state.log(f"Chế độ Stop Win (Khung giờ): {'ĐÃ BẬT' if payload.stop_win else 'ĐÃ TẮT'}", "info")
+    if payload.bet_mode is not None:
+        state.daily_bet_mode = "inverse" if str(payload.bet_mode).strip().lower() in ("inverse", "nguoc", "ngược") else "forward"
+        state.log(f"Daily Auto-Bet: Chiều đánh {'ĐÁNH NGƯỢC' if state.daily_bet_mode == 'inverse' else 'ĐÁNH THUẬN'}", "info")
 
     from dataclasses import replace
     from ..config import save_config
@@ -1345,6 +1367,7 @@ async def update_daily_config(payload: DailyConfigPayload):
             daily_autobet_enabled=state.daily_autobet_enabled,
             daily_stake=state.daily_stake,
             daily_stop_win_enabled=state.daily_stop_win_enabled,
+            daily_bet_mode=state.daily_bet_mode,
         )
         save_config(updated)
         state.config = updated
@@ -1357,6 +1380,7 @@ async def update_daily_config(payload: DailyConfigPayload):
         "selected_windows": list(state.selected_windows),
         "autobet_enabled": state.daily_autobet_enabled,
         "stop_win_enabled": state.daily_stop_win_enabled,
+        "bet_mode": state.daily_bet_mode,
     }
 
 
@@ -1409,7 +1433,7 @@ async def trigger_manual_autobet():
             orders.append(
                 BetOrder(
                     table_name=score.table_name,
-                    side=sig.side.value,
+                    side=resolve_bet_side(sig.side.value, state.daily_bet_mode),
                     stake=state.daily_stake,
                     session_window=active_win,
                     order_id=f"web-manual-{score.table_name}-{utc_now_iso_ms()}",
@@ -1503,6 +1527,7 @@ async def get_run_length():
         "all_windows": list(DAILY_EXPERIMENT_WINDOW_LABELS),
         "stake": state.run_length_stake,
         "autobet_enabled": state.run_length_autobet_enabled,
+        "bet_mode": state.run_length_bet_mode,
         "pending": state._run_length_pending is not None,
         "pending_bet": state._run_length_pending,
         "candidate": cand_info,
@@ -1529,6 +1554,9 @@ async def update_run_length_config(payload: RunLengthConfigPayload):
     if payload.autobet is not None:
         state.run_length_autobet_enabled = payload.autobet
         state.log(f"Chế độ Live Auto-Bet Run Length >=58%: {'ĐÃ BẬT' if payload.autobet else 'ĐÃ TẮT'}", "info")
+    if payload.bet_mode is not None:
+        state.run_length_bet_mode = "inverse" if str(payload.bet_mode).strip().lower() in ("inverse", "nguoc", "ngược") else "forward"
+        state.log(f"Run Length Auto-Bet: Chiều đánh {'ĐÁNH NGƯỢC' if state.run_length_bet_mode == 'inverse' else 'ĐÁNH THUẬN'}", "info")
 
     from dataclasses import replace
     try:
@@ -1537,6 +1565,7 @@ async def update_run_length_config(payload: RunLengthConfigPayload):
             run_length_selected_windows=tuple(state.run_length_selected_windows),
             run_length_stake=state.run_length_stake,
             run_length_autobet_enabled=state.run_length_autobet_enabled,
+            run_length_bet_mode=state.run_length_bet_mode,
         )
         save_config(updated)
         state.config = updated
@@ -1549,6 +1578,7 @@ async def update_run_length_config(payload: RunLengthConfigPayload):
         "stake": state.run_length_stake,
         "selected_windows": list(state.run_length_selected_windows),
         "autobet_enabled": state.run_length_autobet_enabled,
+        "bet_mode": state.run_length_bet_mode,
     }
 
 
@@ -1577,7 +1607,7 @@ async def trigger_manual_run_length_autobet():
     prob = float(signal.features.get("ml_probability_win", signal.confidence))
     order = BetOrder(
         table_name=signal.table_name,
-        side=signal.side.value,
+        side=resolve_bet_side(signal.side.value, state.run_length_bet_mode),
         stake=state.run_length_stake,
         session_window=active_win,
         order_id=f"web-manual-rl-{signal.table_name}-{utc_now_iso_ms()}",
@@ -1710,6 +1740,7 @@ async def get_ensemble_majority():
         "all_windows": list(DAILY_EXPERIMENT_WINDOW_LABELS),
         "stake": state.ensemble_majority_stake,
         "autobet_enabled": state.ensemble_majority_autobet_enabled,
+        "bet_mode": state.ensemble_majority_bet_mode,
         "min_probability": state.ensemble_majority_ml_min_probability,
         "pending": state._ensemble_majority_pending is not None,
         "pending_bet": state._ensemble_majority_pending,
@@ -1739,6 +1770,9 @@ async def update_ensemble_majority_config(payload: EnsembleMajorityConfigPayload
         state.log(f"Chế độ Live Auto-Bet Ensemble Majority: {'ĐÃ BẬT' if payload.autobet else 'ĐÃ TẮT'}", "info")
     if payload.min_probability is not None and 0.50 <= payload.min_probability <= 1.0:
         state.ensemble_majority_ml_min_probability = payload.min_probability
+    if payload.bet_mode is not None:
+        state.ensemble_majority_bet_mode = "inverse" if str(payload.bet_mode).strip().lower() in ("inverse", "nguoc", "ngược") else "forward"
+        state.log(f"Ensemble Majority Auto-Bet: Chiều đánh {'ĐÁNH NGƯỢC' if state.ensemble_majority_bet_mode == 'inverse' else 'ĐÁNH THUẬN'}", "info")
 
     from dataclasses import replace
     try:
@@ -1748,6 +1782,7 @@ async def update_ensemble_majority_config(payload: EnsembleMajorityConfigPayload
             ensemble_majority_stake=state.ensemble_majority_stake,
             ensemble_majority_autobet_enabled=state.ensemble_majority_autobet_enabled,
             ensemble_majority_ml_min_probability=state.ensemble_majority_ml_min_probability,
+            ensemble_majority_bet_mode=state.ensemble_majority_bet_mode,
         )
         save_config(updated)
         state.config = updated
@@ -1760,6 +1795,7 @@ async def update_ensemble_majority_config(payload: EnsembleMajorityConfigPayload
         "stake": state.ensemble_majority_stake,
         "selected_windows": list(state.ensemble_majority_selected_windows),
         "autobet_enabled": state.ensemble_majority_autobet_enabled,
+        "bet_mode": state.ensemble_majority_bet_mode,
         "min_probability": state.ensemble_majority_ml_min_probability,
     }
 
@@ -1789,7 +1825,7 @@ async def trigger_manual_ensemble_majority_autobet():
     prob = float(signal.features.get("ml_probability_win", signal.confidence))
     order = BetOrder(
         table_name=signal.table_name,
-        side=signal.side.value,
+        side=resolve_bet_side(signal.side.value, state.ensemble_majority_bet_mode),
         stake=state.ensemble_majority_stake,
         session_window=active_win,
         order_id=f"web-manual-em-{signal.table_name}-{utc_now_iso_ms()}",
@@ -1924,6 +1960,7 @@ async def get_adaptive_regime():
         "all_windows": list(DAILY_EXPERIMENT_WINDOW_LABELS),
         "stake": state.adaptive_regime_stake,
         "autobet_enabled": state.adaptive_regime_autobet_enabled,
+        "bet_mode": state.adaptive_regime_bet_mode,
         "banker_min_probability": ADAPTIVE_REGIME_BANKER_MIN_ML,
         "player_min_probability": ADAPTIVE_REGIME_PLAYER_MIN_ML,
         "pending": state._adaptive_regime_pending is not None,
@@ -1952,6 +1989,9 @@ async def update_adaptive_regime_config(payload: AdaptiveRegimeConfigPayload):
     if payload.autobet is not None:
         state.adaptive_regime_autobet_enabled = payload.autobet
         state.log(f"Chế độ Live Auto-Bet Đa Cầu Thích Ứng: {'ĐÃ BẬT' if payload.autobet else 'ĐÃ TẮT'}", "info")
+    if payload.bet_mode is not None:
+        state.adaptive_regime_bet_mode = "inverse" if str(payload.bet_mode).strip().lower() in ("inverse", "nguoc", "ngược") else "forward"
+        state.log(f"Adaptive Regime Auto-Bet: Chiều đánh {'ĐÁNH NGƯỢC' if state.adaptive_regime_bet_mode == 'inverse' else 'ĐÁNH THUẬN'}", "info")
 
     from dataclasses import replace
     try:
@@ -1960,6 +2000,7 @@ async def update_adaptive_regime_config(payload: AdaptiveRegimeConfigPayload):
             adaptive_regime_selected_windows=tuple(state.adaptive_regime_selected_windows),
             adaptive_regime_stake=state.adaptive_regime_stake,
             adaptive_regime_autobet_enabled=state.adaptive_regime_autobet_enabled,
+            adaptive_regime_bet_mode=state.adaptive_regime_bet_mode,
         )
         save_config(updated)
         state.config = updated
@@ -1972,6 +2013,7 @@ async def update_adaptive_regime_config(payload: AdaptiveRegimeConfigPayload):
         "stake": state.adaptive_regime_stake,
         "selected_windows": list(state.adaptive_regime_selected_windows),
         "autobet_enabled": state.adaptive_regime_autobet_enabled,
+        "bet_mode": state.adaptive_regime_bet_mode,
     }
 
 
@@ -2001,7 +2043,7 @@ async def trigger_manual_adaptive_regime_autobet():
     pattern = signal.features.get("road_pattern", "")
     order = BetOrder(
         table_name=signal.table_name,
-        side=signal.side.value,
+        side=resolve_bet_side(signal.side.value, state.adaptive_regime_bet_mode),
         stake=state.adaptive_regime_stake,
         session_window=active_win,
         order_id=f"web-manual-ar-{signal.table_name}-{utc_now_iso_ms()}",

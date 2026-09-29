@@ -155,6 +155,28 @@ def normalize_bet_side(side: Any) -> str:
     return "BANKER"
 
 
+def invert_bet_side(side: Any) -> str:
+    """Invert a bet side: PLAYER/'P' -> 'B', BANKER/'B' -> 'P'."""
+    norm = normalize_bet_side(side)
+    return "B" if norm == "PLAYER" else "P"
+
+
+def resolve_bet_side(side: Any, bet_mode: str = "forward") -> str:
+    """Resolve bet side according to bet_mode ('forward' or 'inverse').
+
+    If bet_mode is 'inverse' (Đánh Ngược):
+        PLAYER -> 'B' (BANKER)
+        BANKER -> 'P' (PLAYER)
+    Otherwise returns 'P' or 'B'.
+    """
+    norm = normalize_bet_side(side)
+    mode = str(bet_mode or "").strip().lower()
+    if mode in ("inverse", "nguoc", "ngược", "reverse", "flip", "đánh ngược", "danh nguoc"):
+        return "B" if norm == "PLAYER" else "P"
+    return "P" if norm == "PLAYER" else "B"
+
+
+
 def map_stake_to_chips(stake: float) -> list[str]:
     """Map numeric stake amount (points) directly to chip denomination keys:
 
