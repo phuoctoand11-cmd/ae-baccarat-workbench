@@ -41,7 +41,35 @@ class BetSide(str, Enum):
         return "Cai" if self == BetSide.BANKER else "Con"
 
 
+def invert_bet_side(side: str | BetSide) -> str:
+    """Invert a bet side: 'B'/'BANKER' -> 'P', 'P'/'PLAYER' -> 'B'."""
+    val = side.value if isinstance(side, BetSide) else str(side)
+    clean = val.strip().upper()
+    if clean in ("P", "PLAYER", "CON", "TAY CON", "TAYCON") or clean.startswith("P") or clean.startswith("CON"):
+        return "B"
+    return "P"
+
+
+def resolve_bet_side(side: str | BetSide, bet_mode: str = "forward") -> str:
+    """Resolve actual bet side to place according to bet_mode ('forward' or 'inverse').
+
+    If bet_mode is 'inverse' (Đánh Ngược):
+        BANKER ('B') -> 'P' (PLAYER)
+        PLAYER ('P') -> 'B' (BANKER)
+    Otherwise returns original side as string ('B' or 'P').
+    """
+    mode = str(bet_mode or "").strip().lower()
+    if mode in ("inverse", "nguoc", "ngược", "reverse", "flip", "đánh ngược", "danh nguoc"):
+        return invert_bet_side(side)
+    val = side.value if isinstance(side, BetSide) else str(side)
+    clean = val.strip().upper()
+    if clean in ("P", "PLAYER", "CON", "TAY CON", "TAYCON") or clean.startswith("P") or clean.startswith("CON"):
+        return "P"
+    return "B"
+
+
 class StrategyAction(str, Enum):
+
     BET = "bet"
     SKIP = "skip"
 

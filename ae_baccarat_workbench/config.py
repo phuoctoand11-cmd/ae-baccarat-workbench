@@ -59,16 +59,21 @@ class AppConfig:
     daily_autobet_enabled: bool = False
     daily_stake: float = 10.0
     daily_stop_win_enabled: bool = True
+    daily_bet_mode: str = "forward"
     run_length_selected_windows: tuple[str, ...] = DEFAULT_RUN_LENGTH_SELECTED_WINDOWS
     run_length_stake: float = 10.0
     run_length_autobet_enabled: bool = False
+    run_length_bet_mode: str = "forward"
     ensemble_majority_selected_windows: tuple[str, ...] = DEFAULT_ENSEMBLE_MAJORITY_SELECTED_WINDOWS
     ensemble_majority_stake: float = 10.0
     ensemble_majority_autobet_enabled: bool = False
     ensemble_majority_ml_min_probability: float = 0.55
+    ensemble_majority_bet_mode: str = "forward"
     adaptive_regime_selected_windows: tuple[str, ...] = DEFAULT_ADAPTIVE_REGIME_SELECTED_WINDOWS
     adaptive_regime_stake: float = 10.0
     adaptive_regime_autobet_enabled: bool = False
+    adaptive_regime_bet_mode: str = "forward"
+
     min_confidence: float = 0.50
     expected_shoe_rounds: int = 72
     stop_signals_after_round: int = 65

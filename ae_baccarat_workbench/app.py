@@ -34,6 +34,7 @@ from .monitor.auto_bettor import (
     extract_target_round_and_shoe,
     normalize_bet_side,
     prepare_bet_orders,
+    resolve_bet_side,
 )
 from .monitor.browser_launcher import DEFAULT_CDP_PORT, is_cdp_port_open, launch_chrome_cdp
 from .monitor.browser_navigator import run_browser_automation
@@ -73,6 +74,17 @@ ADAPTIVE_REGIME_PLAYER_MIN_ML = 0.525
 ADAPTIVE_REGIME_HISTORY_ROW_LIMIT = 250
 BANGKOK_TIMEZONE = timezone(timedelta(hours=7))
 _REAL_DATETIME = datetime
+BET_MODE_FORWARD = "Đánh Thuận"
+BET_MODE_INVERSE = "Đánh Ngược"
+BET_MODE_OPTIONS = (BET_MODE_FORWARD, BET_MODE_INVERSE)
+
+
+def _bet_mode_to_label(mode: str) -> str:
+    return BET_MODE_INVERSE if str(mode or "").strip().lower() in ("inverse", "nguoc", "ngược", "reverse", "flip", "đánh ngược", "danh nguoc") else BET_MODE_FORWARD
+
+
+def _label_to_bet_mode(label: str) -> str:
+    return "inverse" if label == BET_MODE_INVERSE else "forward"
 
 
 class BaccaratWorkbenchApp:
@@ -151,6 +163,9 @@ class BaccaratWorkbenchApp:
         self.run_length_autobet_var = tk.BooleanVar(
             value=bool(getattr(self.config, "run_length_autobet_enabled", False))
         )
+        self.run_length_bet_mode_var = tk.StringVar(
+            value=_bet_mode_to_label(getattr(self.config, "run_length_bet_mode", "forward"))
+        )
         self._run_length_autobet_armed_today: set[str] = set()
 
         configured_ensemble_majority_windows = set(getattr(self.config, "ensemble_majority_selected_windows", ()))
@@ -166,6 +181,9 @@ class BaccaratWorkbenchApp:
         self._ensemble_majority_history_loaded_key: tuple[str | None, str | None] | None = None
         self.ensemble_majority_autobet_var = tk.BooleanVar(
             value=bool(getattr(self.config, "ensemble_majority_autobet_enabled", False))
+        )
+        self.ensemble_majority_bet_mode_var = tk.StringVar(
+            value=_bet_mode_to_label(getattr(self.config, "ensemble_majority_bet_mode", "forward"))
         )
         self._ensemble_majority_autobet_armed_today: set[str] = set()
 
@@ -183,6 +201,9 @@ class BaccaratWorkbenchApp:
         self.adaptive_regime_autobet_var = tk.BooleanVar(
             value=bool(getattr(self.config, "adaptive_regime_autobet_enabled", False))
         )
+        self.adaptive_regime_bet_mode_var = tk.StringVar(
+            value=_bet_mode_to_label(getattr(self.config, "adaptive_regime_bet_mode", "forward"))
+        )
         self._adaptive_regime_autobet_armed_today: set[str] = set()
 
         self.cdp_var = tk.StringVar(value=self.config.cdp_url)
@@ -199,6 +220,9 @@ class BaccaratWorkbenchApp:
         self.automation_status_var = tk.StringVar(value="Sẵn sàng: Nhập URL, ID & Pass để tự động vào sảnh AE Sexy.")
         self.automation_running = False
         self.daily_autobet_var = tk.BooleanVar(value=bool(self.config.daily_autobet_enabled))
+        self.daily_bet_mode_var = tk.StringVar(
+            value=_bet_mode_to_label(getattr(self.config, "daily_bet_mode", "forward"))
+        )
         self.auto_bettor = LiveAutoBettor(cdp_url=self.config.cdp_url)
         self._autobet_armed_today: set[str] = set()
         self._last_auto_arm_monotonic: float = 0.0
@@ -904,6 +928,17 @@ class BaccaratWorkbenchApp:
         stake_entry = ttk.Entry(header, textvariable=self.daily_stake_var, width=8)
         stake_entry.pack(side="left")
 
+        ttk.Label(header, text="Chiều đánh:").pack(side="left", padx=(10, 4))
+        daily_mode_combo = ttk.Combobox(
+            header,
+            textvariable=self.daily_bet_mode_var,
+            values=BET_MODE_OPTIONS,
+            state="readonly",
+            width=11,
+        )
+        daily_mode_combo.pack(side="left", padx=(0, 6))
+        daily_mode_combo.bind("<<ComboboxSelected>>", self._on_daily_bet_mode_changed)
+
         def _on_daily_stake_changed(*_args: Any) -> None:
             raw = self.daily_stake_var.get().strip()
             with contextlib.suppress(ValueError):
@@ -1138,6 +1173,16 @@ class BaccaratWorkbenchApp:
             text="Lưu stake",
             command=self._save_run_length_stake,
         ).pack(side="left", padx=(6, 0))
+        ttk.Label(header, text="Chiều đánh:").pack(side="left", padx=(10, 4))
+        run_length_mode_combo = ttk.Combobox(
+            header,
+            textvariable=self.run_length_bet_mode_var,
+            values=BET_MODE_OPTIONS,
+            state="readonly",
+            width=11,
+        )
+        run_length_mode_combo.pack(side="left", padx=(0, 6))
+        run_length_mode_combo.bind("<<ComboboxSelected>>", self._on_run_length_bet_mode_changed)
         ttk.Checkbutton(
             header,
             text="Bật tự động đánh theo khung giờ (Live Auto-Bet)",
@@ -1367,6 +1412,16 @@ class BaccaratWorkbenchApp:
             text="Lưu min ML",
             command=self._save_ensemble_majority_min_prob,
         ).pack(side="left", padx=(4, 8))
+        ttk.Label(header, text="Chiều đánh:").pack(side="left", padx=(6, 4))
+        ensemble_mode_combo = ttk.Combobox(
+            header,
+            textvariable=self.ensemble_majority_bet_mode_var,
+            values=BET_MODE_OPTIONS,
+            state="readonly",
+            width=11,
+        )
+        ensemble_mode_combo.pack(side="left", padx=(0, 6))
+        ensemble_mode_combo.bind("<<ComboboxSelected>>", self._on_ensemble_majority_bet_mode_changed)
 
         ttk.Checkbutton(
             header,
@@ -1585,6 +1640,16 @@ class BaccaratWorkbenchApp:
             text="Lưu stake",
             command=self._save_adaptive_regime_stake,
         ).pack(side="left", padx=(4, 8))
+        ttk.Label(header, text="Chiều đánh:").pack(side="left", padx=(6, 4))
+        adaptive_mode_combo = ttk.Combobox(
+            header,
+            textvariable=self.adaptive_regime_bet_mode_var,
+            values=BET_MODE_OPTIONS,
+            state="readonly",
+            width=11,
+        )
+        adaptive_mode_combo.pack(side="left", padx=(0, 6))
+        adaptive_mode_combo.bind("<<ComboboxSelected>>", self._on_adaptive_regime_bet_mode_changed)
 
         ttk.Checkbutton(
             header,
@@ -2093,7 +2158,8 @@ class BaccaratWorkbenchApp:
                 raise ValueError("ML threshold phai > 0 va <= 1.")
             auto_refresh_seconds = _parse_auto_refresh_seconds(self.auto_refresh_seconds_var.get())
             live_table_stale_seconds = _parse_live_table_stale_seconds(self.live_table_stale_seconds_var.get())
-            self.config = AppConfig(
+            self.config = replace(
+                self.config,
                 cdp_url=self.cdp_var.get().strip() or self.config.cdp_url,
                 sqlite_path=self.config.sqlite_path,
                 duckdb_path=self.config.duckdb_path,
@@ -2107,9 +2173,13 @@ class BaccaratWorkbenchApp:
                 daily_selected_windows=self._selected_daily_windows(),
                 daily_autobet_enabled=bool(self.daily_autobet_var.get()),
                 daily_stake=float(self.daily_stake_var.get().strip() or self.config.daily_stake),
+                daily_bet_mode=_label_to_bet_mode(self.daily_bet_mode_var.get()),
                 run_length_selected_windows=self._selected_run_length_windows(),
                 run_length_stake=float(self.config.run_length_stake),
                 run_length_autobet_enabled=bool(self.run_length_autobet_var.get()),
+                run_length_bet_mode=_label_to_bet_mode(self.run_length_bet_mode_var.get()),
+                ensemble_majority_bet_mode=_label_to_bet_mode(self.ensemble_majority_bet_mode_var.get()),
+                adaptive_regime_bet_mode=_label_to_bet_mode(self.adaptive_regime_bet_mode_var.get()),
                 min_confidence=float(self.min_conf_var.get()),
                 expected_shoe_rounds=int(self.expected_shoe_rounds_var.get()),
                 stop_signals_after_round=int(self.stop_after_round_var.get()),
@@ -2900,6 +2970,18 @@ class BaccaratWorkbenchApp:
             self._append_live_log(f"⚠ [Auto-Bet] Không lưu được cấu hình: {exc}")
         self._refresh_daily_tab()
 
+    def _on_daily_bet_mode_changed(self, *_args: Any) -> None:
+        label = self.daily_bet_mode_var.get()
+        mode = _label_to_bet_mode(label)
+        if mode != getattr(self.config, "daily_bet_mode", "forward"):
+            updated_config = replace(self.config, daily_bet_mode=mode)
+            try:
+                save_config(updated_config)
+                self.config = updated_config
+                self._append_live_log(f"⚙ [Auto-Bet Daily] Chiều đánh thật: {label} ({mode})")
+            except Exception as exc:
+                self._append_live_log(f"⚠ [Auto-Bet Daily] Không lưu được cấu hình: {exc}")
+
     def _is_daily_stop_win_enabled(self) -> bool:
         if hasattr(self, "daily_stop_win_var"):
             return bool(self.daily_stop_win_var.get())
@@ -3072,6 +3154,18 @@ class BaccaratWorkbenchApp:
         self._append_live_log(msg)
         if hasattr(self, "run_length_status_var"):
             self.run_length_status_var.set(msg)
+
+    def _on_run_length_bet_mode_changed(self, *_args: Any) -> None:
+        label = self.run_length_bet_mode_var.get()
+        mode = _label_to_bet_mode(label)
+        if mode != getattr(self.config, "run_length_bet_mode", "forward"):
+            updated_config = replace(self.config, run_length_bet_mode=mode)
+            try:
+                save_config(updated_config)
+                self.config = updated_config
+                self._append_live_log(f"⚙ [Auto-Bet Run Length] Chiều đánh thật: {label} ({mode})")
+            except Exception as exc:
+                self._append_live_log(f"⚠ [Auto-Bet Run Length] Không lưu được cấu hình: {exc}")
 
     def _ensure_run_length_slot_cache(self, session_date: str) -> None:
         if self._run_length_slot_cache_date == session_date:
@@ -3339,7 +3433,10 @@ class BaccaratWorkbenchApp:
             new_orders.append(
                 BetOrder(
                     table_name=signal.table_name,
-                    side=signal.side.value if signal.side else "",
+                    side=resolve_bet_side(
+                        signal.side.value if signal.side else "",
+                        getattr(self.config, "run_length_bet_mode", "forward"),
+                    ),
                     stake=stake,
                     session_window=active_window,
                     order_id=order_key,
@@ -3531,6 +3628,18 @@ class BaccaratWorkbenchApp:
         self._append_live_log(msg)
         if hasattr(self, "ensemble_majority_status_var"):
             self.ensemble_majority_status_var.set(msg)
+
+    def _on_ensemble_majority_bet_mode_changed(self, *_args: Any) -> None:
+        label = self.ensemble_majority_bet_mode_var.get()
+        mode = _label_to_bet_mode(label)
+        if mode != getattr(self.config, "ensemble_majority_bet_mode", "forward"):
+            updated_config = replace(self.config, ensemble_majority_bet_mode=mode)
+            try:
+                save_config(updated_config)
+                self.config = updated_config
+                self._append_live_log(f"⚙ [Auto-Bet Ensemble Majority] Chiều đánh thật: {label} ({mode})")
+            except Exception as exc:
+                self._append_live_log(f"⚠ [Auto-Bet Ensemble Majority] Không lưu được cấu hình: {exc}")
 
     def _ensure_ensemble_majority_slot_cache(self, session_date: str) -> None:
         if self._ensemble_majority_slot_cache_date == session_date:
@@ -3802,7 +3911,10 @@ class BaccaratWorkbenchApp:
             new_orders.append(
                 BetOrder(
                     table_name=signal.table_name,
-                    side=signal.side.value if signal.side else "",
+                    side=resolve_bet_side(
+                        signal.side.value if signal.side else "",
+                        getattr(self.config, "ensemble_majority_bet_mode", "forward"),
+                    ),
                     stake=stake,
                     session_window=active_window,
                     order_id=order_key,
@@ -3969,6 +4081,18 @@ class BaccaratWorkbenchApp:
         self._append_live_log(msg)
         if hasattr(self, "adaptive_regime_status_var"):
             self.adaptive_regime_status_var.set(msg)
+
+    def _on_adaptive_regime_bet_mode_changed(self, *_args: Any) -> None:
+        label = self.adaptive_regime_bet_mode_var.get()
+        mode = _label_to_bet_mode(label)
+        if mode != getattr(self.config, "adaptive_regime_bet_mode", "forward"):
+            updated_config = replace(self.config, adaptive_regime_bet_mode=mode)
+            try:
+                save_config(updated_config)
+                self.config = updated_config
+                self._append_live_log(f"⚙ [Auto-Bet Adaptive Regime] Chiều đánh thật: {label} ({mode})")
+            except Exception as exc:
+                self._append_live_log(f"⚠ [Auto-Bet Adaptive Regime] Không lưu được cấu hình: {exc}")
 
     def _ensure_adaptive_regime_slot_cache(self, session_date: str) -> None:
         if self._adaptive_regime_slot_cache_date == session_date:
@@ -4240,7 +4364,10 @@ class BaccaratWorkbenchApp:
             new_orders.append(
                 BetOrder(
                     table_name=signal.table_name,
-                    side=signal.side.value if signal.side else "",
+                    side=resolve_bet_side(
+                        signal.side.value if signal.side else "",
+                        getattr(self.config, "adaptive_regime_bet_mode", "forward"),
+                    ),
                     stake=stake,
                     session_window=active_window,
                     order_id=order_key,
@@ -4500,10 +4627,14 @@ class BaccaratWorkbenchApp:
                         current_round_no=snap.current_round_no if snap else None,
                         current_shoe=snap.shoe if snap else None,
                     )
+                    actual_side = resolve_bet_side(
+                        signal.side.value,
+                        getattr(self.config, "daily_bet_mode", "forward"),
+                    )
                     new_orders.append(
                         BetOrder(
                             table_name=score.table_name,
-                            side=signal.side.value,
+                            side=actual_side,
                             stake=stake,
                             session_window=active_window,
                             order_id=order_key,
@@ -4752,10 +4883,14 @@ class BaccaratWorkbenchApp:
                     current_round_no=snap.current_round_no if snap else None,
                     current_shoe=snap.shoe if snap else None,
                 )
+                actual_side = resolve_bet_side(
+                    signal.side.value,
+                    getattr(self.config, "daily_bet_mode", "forward"),
+                )
                 orders.append(
                     BetOrder(
                         table_name=score.table_name,
-                        side=signal.side.value,
+                        side=actual_side,
                         stake=stake,
                         session_window=active_window,
                         order_id=f"manual-{score.table_name}-{utc_now_iso_ms()}",
@@ -4771,9 +4906,10 @@ class BaccaratWorkbenchApp:
             messagebox.showinfo("Thông báo", "Không tìm thấy tín hiệu đặt cược hợp lệ.")
             return
 
+        mode_label = self.daily_bet_mode_var.get()
         confirm = messagebox.askyesno(
-            "Xác nhận Auto-Bet",
-            f"Bạn có chắc chắn muốn đặt cược thật {len(orders)} bàn:\n\n"
+            f"Xác nhận Auto-Bet ({mode_label})",
+            f"Bạn có chắc chắn muốn đặt cược thật ({mode_label}) {len(orders)} bàn:\n\n"
             + "\n".join(
                 f"- {o.table_name}: {'Con (Player)' if normalize_bet_side(o.side) == 'PLAYER' else 'Cái (Banker)'} {o.stake:g} điểm (Ván {o.target_round_no if o.target_round_no else '?'})"
                 for o in orders
@@ -4818,9 +4954,13 @@ class BaccaratWorkbenchApp:
             current_shoe=snap.shoe if snap else None,
         )
         prob = float(signal.features.get("ml_probability_win", signal.confidence))
+        actual_side = resolve_bet_side(
+            signal.side.value,
+            getattr(self.config, "run_length_bet_mode", "forward"),
+        )
         order = BetOrder(
             table_name=signal.table_name,
-            side=signal.side.value,
+            side=actual_side,
             stake=stake,
             session_window=active_window,
             order_id=f"manual-rl-{signal.table_name}-{utc_now_iso_ms()}",
@@ -4832,9 +4972,10 @@ class BaccaratWorkbenchApp:
         )
 
         side_str = "Con (Player)" if normalize_bet_side(order.side) == "PLAYER" else "Cái (Banker)"
+        mode_label = self.run_length_bet_mode_var.get()
         confirm = messagebox.askyesno(
-            "Xác nhận Auto-Bet Run Length",
-            f"Bạn có chắc chắn muốn đặt cược thật ứng viên Run Length:\n\n"
+            f"Xác nhận Auto-Bet Run Length ({mode_label})",
+            f"Bạn có chắc chắn muốn đặt cược thật ({mode_label}) ứng viên Run Length:\n\n"
             f"- Bàn: {order.table_name}\n"
             f"- Cửa: {side_str}\n"
             f"- Tỷ lệ ML: {prob*100:.1f}%\n"
@@ -4880,9 +5021,13 @@ class BaccaratWorkbenchApp:
             current_shoe=snap.shoe if snap else None,
         )
         prob = float(signal.features.get("ml_probability_win", signal.confidence))
+        actual_side = resolve_bet_side(
+            signal.side.value,
+            getattr(self.config, "ensemble_majority_bet_mode", "forward"),
+        )
         order = BetOrder(
             table_name=signal.table_name,
-            side=signal.side.value,
+            side=actual_side,
             stake=stake,
             session_window=active_window,
             order_id=f"manual-em-{signal.table_name}-{utc_now_iso_ms()}",
@@ -4894,9 +5039,10 @@ class BaccaratWorkbenchApp:
         )
 
         side_str = "Con (Player)" if normalize_bet_side(order.side) == "PLAYER" else "Cái (Banker)"
+        mode_label = self.ensemble_majority_bet_mode_var.get()
         confirm = messagebox.askyesno(
-            "Xác nhận Auto-Bet Ensemble Majority",
-            f"Bạn có chắc chắn muốn đặt cược thật ứng viên Ensemble Majority:\n\n"
+            f"Xác nhận Auto-Bet Ensemble Majority ({mode_label})",
+            f"Bạn có chắc chắn muốn đặt cược thật ({mode_label}) ứng viên Ensemble Majority:\n\n"
             f"- Bàn: {order.table_name}\n"
             f"- Cửa: {side_str}\n"
             f"- Tỷ lệ ML: {prob*100:.1f}%\n"
@@ -4942,9 +5088,13 @@ class BaccaratWorkbenchApp:
         )
         prob = float(signal.features.get("ml_probability_win", signal.confidence))
         pattern = signal.features.get("road_pattern", "")
+        actual_side = resolve_bet_side(
+            signal.side.value,
+            getattr(self.config, "adaptive_regime_bet_mode", "forward"),
+        )
         order = BetOrder(
             table_name=signal.table_name,
-            side=signal.side.value,
+            side=actual_side,
             stake=stake,
             session_window=active_window,
             order_id=f"manual-ar-{signal.table_name}-{utc_now_iso_ms()}",
@@ -4957,9 +5107,10 @@ class BaccaratWorkbenchApp:
 
         side_str = "Con (Player)" if normalize_bet_side(order.side) == "PLAYER" else "Cái (Banker)"
         pattern_str = f" [{pattern}]" if pattern else ""
+        mode_label = self.adaptive_regime_bet_mode_var.get()
         confirm = messagebox.askyesno(
-            "Xác nhận Auto-Bet Đa Cầu Thích Ứng",
-            f"Bạn có chắc chắn muốn đặt cược thật ứng viên Đa Cầu Thích Ứng:\n\n"
+            f"Xác nhận Auto-Bet Đa Cầu Thích Ứng ({mode_label})",
+            f"Bạn có chắc chắn muốn đặt cược thật ({mode_label}) ứng viên Đa Cầu Thích Ứng:\n\n"
             f"- Bàn: {order.table_name}\n"
             f"- Cửa: {side_str}{pattern_str}\n"
             f"- Tỷ lệ ML: {prob*100:.1f}%\n"

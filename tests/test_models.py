@@ -36,6 +36,30 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(snapshot.current_shoe_road(), "P B")
         self.assertEqual(snapshot.current_shoe_road(limit=1), "B")
 
+    def test_invert_and_resolve_bet_side(self) -> None:
+        from ae_baccarat_workbench.models import BetSide, invert_bet_side, resolve_bet_side
+
+        # invert_bet_side
+        self.assertEqual(invert_bet_side("P"), "B")
+        self.assertEqual(invert_bet_side("PLAYER"), "B")
+        self.assertEqual(invert_bet_side("Con"), "B")
+        self.assertEqual(invert_bet_side("B"), "P")
+        self.assertEqual(invert_bet_side("BANKER"), "P")
+        self.assertEqual(invert_bet_side(BetSide.PLAYER), "B")
+        self.assertEqual(invert_bet_side(BetSide.BANKER), "P")
+
+        # resolve_bet_side forward
+        self.assertEqual(resolve_bet_side("P", "forward"), "P")
+        self.assertEqual(resolve_bet_side("B", "forward"), "B")
+        self.assertEqual(resolve_bet_side(BetSide.PLAYER), "P")
+        self.assertEqual(resolve_bet_side(BetSide.BANKER), "B")
+
+        # resolve_bet_side inverse
+        self.assertEqual(resolve_bet_side("P", "inverse"), "B")
+        self.assertEqual(resolve_bet_side("B", "inverse"), "P")
+        self.assertEqual(resolve_bet_side("P", "Đánh Ngược"), "B")
+        self.assertEqual(resolve_bet_side("B", "nguoc"), "P")
+
 
 if __name__ == "__main__":
     unittest.main()
