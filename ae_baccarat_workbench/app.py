@@ -14,7 +14,7 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from .ae_decode import parse_manual_sequence
-from .config import AppConfig, load_config, parse_stake_chain, save_config
+from .config import AppConfig, URL_PRESETS, load_config, parse_stake_chain, save_config
 from .engine import WorkbenchEngine, signal_side_label
 from .ml_live import MlSignalFilter
 from .models import (
@@ -211,6 +211,13 @@ class BaccaratWorkbenchApp:
         self.auto_refresh_seconds_var = tk.StringVar(value=str(self.config.auto_refresh_seconds))
         self.manual_table_var = tk.StringVar(value=self.config.manual_table_name)
         self.target_url_var = tk.StringVar(value=self.config.target_url)
+        self.preset_var = tk.StringVar()
+        if "svft388" in self.config.target_url or "sv388" in self.config.target_url:
+            self.preset_var.set("SV388 (svft388.com)")
+        elif "8887799" in self.config.target_url or "bong88" in self.config.target_url:
+            self.preset_var.set("Bong88 (8887799.net)")
+        else:
+            self.preset_var.set("Tùy chỉnh")
         self.account_id_var = tk.StringVar(value=self.config.account_id)
         self.account_password_var = tk.StringVar(value=self.config.account_password)
         self.remember_credentials_var = tk.BooleanVar(value=self.config.remember_credentials)
@@ -325,9 +332,24 @@ class BaccaratWorkbenchApp:
         browser_card.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         browser_card.columnconfigure(1, weight=1)
 
-        # Row 0: Link URL web + Cổng CDP + Mở Chrome CDP
-        ttk.Label(browser_card, text="Link URL web:").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=4)
-        ttk.Entry(browser_card, textvariable=self.target_url_var).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
+        # Row 0: Link URL web / Preset + Cổng CDP + Mở Chrome CDP
+        ttk.Label(browser_card, text="Trang web (Preset):").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=4)
+        preset_frame = ttk.Frame(browser_card)
+        preset_frame.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
+        preset_frame.columnconfigure(2, weight=1)
+
+        self.preset_combo = ttk.Combobox(
+            preset_frame,
+            textvariable=self.preset_var,
+            values=("Bong88 (8887799.net)", "SV388 (svft388.com)", "Tùy chỉnh"),
+            state="readonly",
+            width=20,
+        )
+        self.preset_combo.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
+
+        ttk.Label(preset_frame, text="URL:").grid(row=0, column=1, sticky="w", padx=(0, 4))
+        ttk.Entry(preset_frame, textvariable=self.target_url_var).grid(row=0, column=2, sticky="ew")
 
         port_frame = ttk.Frame(browser_card)
         port_frame.grid(row=0, column=2, sticky="e", pady=4)
@@ -355,6 +377,8 @@ class BaccaratWorkbenchApp:
             textvariable=self.ae_lobby_var,
             values=(
                 "AE Sexy, Sexy Casino",
+                "SEXYBCRT, Sexy Casino, AE Sexy",
+                "SEXYBCRT",
                 "AE Sexy",
                 "Sexy Casino",
                 "Sexy Gaming",
@@ -1928,6 +1952,15 @@ class BaccaratWorkbenchApp:
         ttk.Label(self.config_tab, text=note, wraplength=760, foreground="#555").grid(
             row=len(rows) + 4, column=0, columnspan=2, sticky="w", pady=(16, 0)
         )
+
+    def _on_preset_selected(self, _event=None) -> None:
+        val = self.preset_var.get()
+        if "Bong88" in val or "8887799" in val:
+            self.target_url_var.set("https://www.8887799.net")
+            self.ae_lobby_var.set("AE Sexy, Sexy Casino")
+        elif "SV388" in val or "svft388" in val:
+            self.target_url_var.set("https://svft388.com")
+            self.ae_lobby_var.set("SEXYBCRT, Sexy Casino, AE Sexy")
 
     def _toggle_show_password(self) -> None:
         if self.show_password_var.get():

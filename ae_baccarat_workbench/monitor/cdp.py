@@ -764,11 +764,15 @@ def _is_relevant_raw_target(target: dict[str, Any]) -> bool:
         return True
     if _host_matches(host, "dafabet.com"):
         return "live-dealer" in path or "ae-live" in text or "sexy casino" in text
+    if _host_matches(host, "svft388.com") or _host_matches(host, "sv388.com"):
+        return "game.jsp" in path or "sexybcrt" in text or "sexy" in text or "/player/" in path
     return (
         "sfcdf." in text
         or "sexy casino" in text
         or "sx~~lobby~baccarat" in text
         or "arrpar.com" in text
+        or "sexybcrt" in text
+        or "game.jsp?pf=" in text
         or "/player/" in path
         or title.strip().lower() == "sexy"
     )
@@ -800,6 +804,8 @@ def _is_relevant_refresh_text(text: str) -> bool:
         or "ae-live" in lowered
         or "sx~~lobby~baccarat" in lowered
         or "arrpar.com" in lowered
+        or "sexybcrt" in lowered
+        or "game.jsp?pf=" in lowered
         or "/player/" in lowered
         or text.strip().lower() == "sexy"
     )

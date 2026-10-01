@@ -15,16 +15,38 @@ CASINO_MENU_PATTERNS = [
     re.compile(r"live\s*casino", re.IGNORECASE),
     re.compile(r"casino\s*trực\s*tuyến", re.IGNORECASE),
     re.compile(r"sòng\s*bài(\s*trực\s*tuyến)?", re.IGNORECASE),
+    re.compile(r"người\s*thật", re.IGNORECASE),
+    re.compile(r"nguoi\s*that", re.IGNORECASE),
     re.compile(r"casino", re.IGNORECASE),
 ]
 
 AE_SEXY_PATTERNS = [
+    re.compile(r"sexybcrt", re.IGNORECASE),
+    re.compile(r"sexy\s*bcrt", re.IGNORECASE),
     re.compile(r"ae\s*sexy(\s*baccarat)?", re.IGNORECASE),
     re.compile(r"sexy\s*casino", re.IGNORECASE),
     re.compile(r"sexy\s*gaming", re.IGNORECASE),
     re.compile(r"ae\s*casino", re.IGNORECASE),
     re.compile(r"\bsexy\b", re.IGNORECASE),
 ]
+
+AE_LOBBY_URL_INDICATORS = (
+    "arrpar.com",
+    "tgmeq.com",
+    "player/webmain",
+    "gamehall.jsp",
+    "sexybcrt",
+    "game.jsp?pf=",
+    "page/player/game.jsp",
+)
+
+
+def is_ae_lobby_url(url: str) -> bool:
+    """Check if given URL points to AE Sexy baccarat lobby across supported portals."""
+    if not url:
+        return False
+    u = url.lower()
+    return any(ind in u for ind in AE_LOBBY_URL_INDICATORS)
 
 
 def build_lobby_patterns(lobby_name: str | None = None) -> list[re.Pattern[str]]:
@@ -101,7 +123,7 @@ async def run_browser_automation(
             # Pre-check: Check if AE Sexy lobby is already open in one of the existing tabs
             for pg in context.pages:
                 pg_url = getattr(pg, "url", "")
-                if any(x in pg_url for x in ("arrpar.com", "tgmeq.com", "player/webMain", "gamehall.jsp")):
+                if is_ae_lobby_url(pg_url):
                     callback("Phát hiện tab sảnh AE Sexy đang mở sẵn trên trình duyệt!")
                     with contextlib.suppress(Exception):
                         await pg.bring_to_front()
@@ -256,7 +278,7 @@ async def run_browser_automation(
                         # Fallback: check if opened in any tab of context
                         for pg in context.pages:
                             pg_url = getattr(pg, "url", "")
-                            if any(x in pg_url for x in ("arrpar.com", "tgmeq.com", "player/webMain", "gamehall.jsp")):
+                            if is_ae_lobby_url(pg_url):
                                 popup_page = pg
                                 callback("Phát hiện sảnh AE Sexy trong danh sách tab trình duyệt!")
                                 break
@@ -296,9 +318,10 @@ async def _check_if_logged_in(page: Any, username: str = "") -> bool:
                 const hasUsername = u.length > 0 && text.includes(u);
 
                 const hasPasswordInput = !!document.querySelector("input[type='password']:not([style*='display: none'])");
+                const hasUserHeader = !!document.querySelector(".header-user, .user-info, .account-info, #userBalance, #memberBalance, .member-info, .member-header");
 
-                if (hasPasswordInput) return false;
-                return hasLogout || hasBalance || hasWelcome || hasUsername;
+                if (hasPasswordInput && !hasUserHeader) return false;
+                return hasLogout || hasBalance || hasWelcome || hasUsername || hasUserHeader;
             }
         """, username)
         return bool(logged_in)
@@ -315,10 +338,14 @@ async def _perform_login(page: Any, username: str, password: str, callback: Stat
     callback("Bắt đầu quy trình tự động đăng nhập...")
     try:
         user_selectors = [
+            "#account",
+            "input#account",
+            "input[name='account']",
+            "input[placeholder*='login name' i]",
+            "input[placeholder*='tên đăng nhập' i]",
             "#username",
             "input[name='username']",
             "input[name='user']",
-            "input[name='account']",
             "input[name='login']",
             "input[id*='user']",
             "input[id*='account']",
@@ -330,6 +357,7 @@ async def _perform_login(page: Any, username: str, password: str, callback: Stat
         ]
         pwd_selectors = [
             "#password",
+            "input#password",
             "input[name='password']",
             "input[name='pass']",
             "input[id*='pass']",
@@ -421,16 +449,21 @@ async def _perform_login(page: Any, username: str, password: str, callback: Stat
 
         # Tích chọn 'Nhớ Tên Người Dùng' nếu có
         with contextlib.suppress(Exception):
-            remember_cb = await page.query_selector(".login-form .checkbox, label[class*='checkbox']:has-text('Nhớ')")
+            remember_cb = await page.query_selector("#rememberMe, i#rememberMe, .icon-checked#rememberMe, .login-form .checkbox, label[class*='checkbox']:has-text('Nhớ')")
             if remember_cb and await remember_cb.is_visible():
                 aria_checked = await remember_cb.get_attribute("aria-checked")
-                if aria_checked != "true":
+                classes = await remember_cb.get_attribute("class") or ""
+                if aria_checked != "true" and "active" not in classes:
                     await remember_cb.click()
 
         # 3. Bấm nút Đăng nhập xác thực
         callback("Đang bấm nút Đăng nhập để xác thực...")
         submit_btn = None
         submit_selectors = [
+            "#loginBtn",
+            "button#loginBtn",
+            ".btn-logIn",
+            "button.btn-logIn",
             ".login-form a.btn--secondary",
             ".login-form .btn",
             ".login-form button",
@@ -444,7 +477,7 @@ async def _perform_login(page: Any, username: str, password: str, callback: Stat
                 s_el = await page.query_selector(s_sel)
                 if s_el and await s_el.is_visible():
                     txt = (await s_el.inner_text()).strip().lower() if hasattr(s_el, "inner_text") else ""
-                    if "đăng nhập" in txt or "login" in txt or "sign in" in txt or "xác nhận" in txt:
+                    if "đăng nhập" in txt or "login" in txt or "sign in" in txt or "xác nhận" in txt or s_sel in ("#loginBtn", "button#loginBtn"):
                         submit_btn = s_el
                         break
             except Exception:
@@ -452,7 +485,7 @@ async def _perform_login(page: Any, username: str, password: str, callback: Stat
 
         if not submit_btn:
             with contextlib.suppress(Exception):
-                form = await password_input.evaluate_handle("e => e.closest('form, .login-form, [class*=\"login\"]')")
+                form = await password_input.evaluate_handle("e => e.closest('form, .login-form, [class*=\"login\"], .modal-layout')")
                 form_el = form.as_element() if form else None
                 if form_el:
                     btns = await form_el.query_selector_all("button, a, input[type='button'], div[role='button']")
@@ -470,9 +503,13 @@ async def _perform_login(page: Any, username: str, password: str, callback: Stat
         callback("Đã gửi thông tin đăng nhập! Đang chờ đăng nhập hoàn tất...")
         for _ in range(10):
             await asyncio.sleep(0.8)
-            # Kiểm tra xem trang có báo lỗi đăng nhập (như Login Too Often [397] hoặc sai mật khẩu) không
+            # Kiểm tra xem trang có báo lỗi đăng nhập (như Login Too Often [397] hoặc sai mật khẩu hoặc SV388 error) không
             with contextlib.suppress(Exception):
                 error_msg = await page.evaluate(r"""() => {
+                    const svError = document.querySelector("#errorMsg, .txt-error p, .txt-error");
+                    if (svError && svError.innerText && svError.innerText.trim() && svError.offsetParent !== null) {
+                        return svError.innerText.trim();
+                    }
                     const failedEl = document.querySelector(".login-form__item--failed, .login-form__item--failed .text-void");
                     if (failedEl && failedEl.innerText && failedEl.innerText.trim()) {
                         return failedEl.innerText.trim();
@@ -483,7 +520,7 @@ async def _perform_login(page: Any, username: str, password: str, callback: Stat
                     }
                     const redEl = Array.from(document.querySelectorAll("*")).find(el => {
                         const t = (el.innerText || '').trim();
-                        return (t.includes('Login Too Often') || t.includes('Wait 5 Minutes') || t.includes('[397]') || t.includes('không chính xác')) && el.children.length === 0;
+                        return (t.includes('Login Too Often') || t.includes('Wait 5 Minutes') || t.includes('[397]') || t.includes('không chính xác') || t.includes('sai mật khẩu')) && el.children.length === 0;
                     });
                     return redEl ? redEl.innerText.trim() : null;
                 }""")
@@ -492,8 +529,9 @@ async def _perform_login(page: Any, username: str, password: str, callback: Stat
                     return False
 
             curr = getattr(page, "url", "")
-            if "/Sports" in curr or "d.8887799.net" in curr:
-                break
+            if "/Sports" in curr or "d.8887799.net" in curr or "svft388.com" in curr:
+                if await _check_if_logged_in(page, username):
+                    break
             if await _check_if_logged_in(page, username):
                 break
         return True
@@ -542,6 +580,20 @@ async def _find_and_click_matching(
                     ])
 
         direct_selectors.extend([
+            'a[data-title*="SEXYBCRT" i]',
+            'a[data-popupname*="SEXYBCRT" i]',
+            '[data-platform="SEXYBCRT"]',
+            '[data-code*="SEXYBCRT" i]',
+            '[data-game*="SEXYBCRT" i]',
+            '[data-pf*="SEXYBCRT" i]',
+            'a[href*="SEXYBCRT" i]',
+            'a[href*="pf=SEXYBCRT" i]',
+            '.SEXYBCRT',
+            'img.SEXYBCRT',
+            'img[src*="SEXYBCRT" i]',
+            'img[alt*="sexy" i]',
+            'a:has-text("SEXYBCRT")',
+            'div:has-text("SEXYBCRT")',
             'a[data-title*="Sexy Casino" i]',
             'a[data-popupname*="Sexy Casino" i]',
             'a[data-title*="AE Sexy" i]',
@@ -557,8 +609,17 @@ async def _find_and_click_matching(
             'a:has-text("Sexy Gaming")',
         ])
     else:
-        # Direct selectors for Live Casino / Sòng bài menu
+        # Direct selectors for Live Casino / Sòng bài / Người thật menu
         direct_selectors.extend([
+            'a:has-text("Người thật")',
+            'button:has-text("Người thật")',
+            'li:has-text("Người thật")',
+            'div:has-text("Người thật")',
+            'span:has-text("Người thật")',
+            '[data-gametype="live"]',
+            '[data-type="live"]',
+            '[data-tab*="live" i]',
+            'a[href*="live"]',
             'a:has-text("Sòng bài")',
             'a:has-text("Live Casino")',
             'a:has-text("Casino trực tuyến")',

@@ -280,11 +280,18 @@ def find_game_websocket_url(cdp_url: str) -> str | None:
     if not targets or not isinstance(targets, list):
         return None
 
-    # Priority 1: Direct target containing player/webMain or tgmeq.com
+    # Priority 1: Direct target containing player/webMain or tgmeq.com or sv388 sexybcrt
     for t in targets:
         url = str(t.get("url") or "")
         ws = t.get("webSocketDebuggerUrl")
-        if ws and ("tgmeq.com" in url or "player/webMain" in url or "usplaynet.com" in url or "arrpar.com" in url):
+        if ws and (
+            "tgmeq.com" in url
+            or "player/webmain" in url.lower()
+            or "usplaynet.com" in url
+            or "arrpar.com" in url
+            or "sexybcrt" in url.lower()
+            or ("page/player/game.jsp" in url and "sexy" in url.lower())
+        ):
             return str(ws)
 
     # Priority 2: Target containing vbgames88 console
