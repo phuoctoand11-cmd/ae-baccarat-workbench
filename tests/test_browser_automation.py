@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from ae_baccarat_workbench.app import _parse_cdp_port
-from ae_baccarat_workbench.config import AppConfig, load_config, save_config
+from ae_baccarat_workbench.config import URL_PRESETS, AppConfig, load_config, save_config
 from ae_baccarat_workbench.monitor.browser_launcher import (
     DEFAULT_CDP_PORT,
     find_chrome_executable,
@@ -16,6 +16,7 @@ from ae_baccarat_workbench.monitor.browser_navigator import (
     AE_SEXY_PATTERNS,
     CASINO_MENU_PATTERNS,
     build_lobby_patterns,
+    is_ae_lobby_url,
 )
 
 
@@ -152,6 +153,42 @@ class BrowserAutomationTests(unittest.TestCase):
         patterns = build_lobby_patterns("")
         self.assertTrue(any(p.search("AE Sexy") for p in patterns))
         self.assertTrue(any(p.search("Sexy Casino") for p in patterns))
+
+    def test_is_ae_lobby_url_recognizes_bong88_and_sv388(self) -> None:
+        # Bong88 / TGMEQ URLs
+        self.assertTrue(is_ae_lobby_url("https://lobby.tgmeq.com/player/webmain?token=xyz"))
+        self.assertTrue(is_ae_lobby_url("https://gamehall.jsp?portal=bong88"))
+
+        # SV388 URLs
+        self.assertTrue(is_ae_lobby_url("https://www.svft388.com/page/player/game.jsp?pf=SEXYBCRT&game_code=SEXYBCRT&tableCode="))
+        self.assertTrue(is_ae_lobby_url("https://svft388.com/page/player/game.jsp?pf=SEXYBCRT"))
+        self.assertTrue(is_ae_lobby_url("https://sub.sv388.com/game.jsp?pf=SEXYBCRT"))
+
+        # Irrelevant URLs
+        self.assertFalse(is_ae_lobby_url("https://www.google.com"))
+        self.assertFalse(is_ae_lobby_url("https://svft388.com/login"))
+        self.assertFalse(is_ae_lobby_url("https://svft388.com/home"))
+        self.assertFalse(is_ae_lobby_url(""))
+
+    def test_casino_menu_patterns_match_sv388_nguoi_that(self) -> None:
+        samples = ["Người thật", "NGƯỜI THẬT", "Người Thật", "Nguoi that", "nguoi that"]
+        for sample in samples:
+            matched = any(p.search(sample) for p in CASINO_MENU_PATTERNS)
+            self.assertTrue(matched, f"Expected match for SV388 menu: {sample}")
+
+    def test_ae_sexy_patterns_match_sv388_sexybcrt(self) -> None:
+        samples = ["SEXYBCRT", "sexybcrt", "SEXY BCRT", "Sexy-BCRT"]
+        for sample in samples:
+            matched = any(p.search(sample) for p in AE_SEXY_PATTERNS)
+            self.assertTrue(matched, f"Expected match for SV388 lobby: {sample}")
+
+    def test_url_presets_contains_bong88_and_sv388(self) -> None:
+        preset_ids = [p["id"] for p in URL_PRESETS]
+        self.assertIn("bong88", preset_ids)
+        self.assertIn("sv388", preset_ids)
+        sv388 = next(p for p in URL_PRESETS if p["id"] == "sv388")
+        self.assertIn("svft388.com", sv388["url"])
+        self.assertIn("SEXYBCRT", sv388["lobby"])
 
 
 if __name__ == "__main__":

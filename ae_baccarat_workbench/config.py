@@ -42,6 +42,21 @@ DEFAULT_RUN_LENGTH_SELECTED_WINDOWS: tuple[str, ...] = ()
 DEFAULT_ENSEMBLE_MAJORITY_SELECTED_WINDOWS: tuple[str, ...] = ()
 DEFAULT_ADAPTIVE_REGIME_SELECTED_WINDOWS: tuple[str, ...] = ()
 
+URL_PRESETS: list[dict[str, str]] = [
+    {
+        "id": "bong88",
+        "name": "Bong88 (8887799.net)",
+        "url": "https://www.8887799.net",
+        "lobby": "AE Sexy, Sexy Casino",
+    },
+    {
+        "id": "sv388",
+        "name": "SV388 (svft388.com)",
+        "url": "https://svft388.com",
+        "lobby": "SEXYBCRT, Sexy Casino, AE Sexy",
+    },
+]
+
 
 @dataclass(frozen=True)
 class AppConfig:

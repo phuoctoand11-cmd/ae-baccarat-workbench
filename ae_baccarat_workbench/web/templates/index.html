@@ -537,22 +537,30 @@
 
       <div class="space-y-3.5 text-xs">
         <div>
-          <label class="block text-slate-400 mb-1 font-semibold">Link URL Nhà Cái (Dafabet / Bong88):</label>
-          <input type="text" id="login-url" value="https://www.vietdfvn.com/vn/live-dealer#redirect" class="w-full bg-slate-950/80 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500">
+          <label class="block text-slate-400 mb-1 font-semibold">Chọn Cổng / Nhà Cái (Preset):</label>
+          <select id="login-preset" onchange="onLoginPresetChange(this.value)" class="w-full bg-slate-950/80 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500">
+            <option value="bong88">Bong88 (8887799.net)</option>
+            <option value="sv388">SV388 (svft388.com)</option>
+            <option value="custom">Tùy chỉnh...</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-slate-400 mb-1 font-semibold">Link URL Nhà Cái:</label>
+          <input type="text" id="login-url" value="https://www.8887799.net" class="w-full bg-slate-950/80 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500">
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-slate-400 mb-1 font-semibold">Tài khoản (ID):</label>
-            <input type="text" id="login-id" value="zombie7979" class="w-full bg-slate-950/80 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500 font-mono">
+            <input type="text" id="login-id" value="" class="w-full bg-slate-950/80 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500 font-mono">
           </div>
           <div>
             <label class="block text-slate-400 mb-1 font-semibold">Mật khẩu:</label>
-            <input type="password" id="login-pass" value="Chien7979" class="w-full bg-slate-950/80 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500 font-mono">
+            <input type="password" id="login-pass" value="" class="w-full bg-slate-950/80 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500 font-mono">
           </div>
         </div>
         <div>
           <label class="block text-slate-400 mb-1 font-semibold">Tên sảnh tìm kiếm:</label>
-          <input type="text" id="login-lobby" value="Sexy Casino, AE Sexy" class="w-full bg-slate-950/80 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500">
+          <input type="text" id="login-lobby" value="AE Sexy, Sexy Casino" class="w-full bg-slate-950/80 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500">
         </div>
       </div>
 
@@ -791,7 +799,19 @@
 
         // Auto-fill login inputs from config
         if (!hasPopulatedLoginInputs && data.target_url) {
-          if (data.target_url) document.getElementById('login-url').value = data.target_url;
+          if (data.target_url) {
+            document.getElementById('login-url').value = data.target_url;
+            const presetEl = document.getElementById('login-preset');
+            if (presetEl) {
+              if (data.target_url.includes('svft388') || data.target_url.includes('sv388')) {
+                presetEl.value = 'sv388';
+              } else if (data.target_url.includes('8887799') || data.target_url.includes('bong88')) {
+                presetEl.value = 'bong88';
+              } else {
+                presetEl.value = 'custom';
+              }
+            }
+          }
           if (data.account_id) document.getElementById('login-id').value = data.account_id;
           if (data.account_password) document.getElementById('login-pass').value = data.account_password;
           if (data.ae_lobby_name) document.getElementById('login-lobby').value = data.ae_lobby_name;
@@ -1290,6 +1310,18 @@
         showToast(`Chiều đánh Daily: ${val === 'inverse' ? 'Đánh Ngược' : 'Đánh Thuận'}`, "info");
       } catch (e) {
         console.error("Lỗi đổi chiều đánh daily:", e);
+      }
+    }
+
+    function onLoginPresetChange(val) {
+      const urlEl = document.getElementById('login-url');
+      const lobbyEl = document.getElementById('login-lobby');
+      if (val === 'bong88') {
+        if (urlEl) urlEl.value = 'https://www.8887799.net';
+        if (lobbyEl) lobbyEl.value = 'AE Sexy, Sexy Casino';
+      } else if (val === 'sv388') {
+        if (urlEl) urlEl.value = 'https://svft388.com';
+        if (lobbyEl) lobbyEl.value = 'SEXYBCRT, Sexy Casino, AE Sexy';
       }
     }
 
