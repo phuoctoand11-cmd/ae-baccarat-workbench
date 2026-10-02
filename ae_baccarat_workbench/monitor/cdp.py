@@ -36,6 +36,9 @@ RAW_TARGET_DOMAINS = (
     "mhuxu.com",
     "vbgames88.com",
     "arrpar.com",
+    "gffend.com",
+    "tgmeq.com",
+    "usplaynet.com",
 )
 RAW_TARGET_EXCLUDED_DOMAINS = (
     "adform.net",
