@@ -280,17 +280,21 @@ def find_game_websocket_url(cdp_url: str) -> str | None:
     if not targets or not isinstance(targets, list):
         return None
 
-    # Priority 1: Direct target containing player/webMain or tgmeq.com or sv388 sexybcrt
+    # Priority 1: Direct target containing the actual AE Sexy game client (player/webMain)
+    # This matches the true game window/iframe (on Bong88, SV388, Dafabet, etc.)
+    # Note: Outer portal wrapper pages (e.g. svft388.com/page/player/game.jsp) MUST NOT be chosen here
+    # because iframeGameHall and iframeGame only exist inside the inner webMain iframe.
     for t in targets:
         url = str(t.get("url") or "")
         ws = t.get("webSocketDebuggerUrl")
         if ws and (
-            "tgmeq.com" in url
-            or "player/webmain" in url.lower()
-            or "usplaynet.com" in url
-            or "arrpar.com" in url
-            or "sexybcrt" in url.lower()
-            or ("page/player/game.jsp" in url and "sexy" in url.lower())
+            "player/webmain" in url.lower()
+            or "gamehall.jsp" in url.lower()
+            or "singlebac" in url.lower()
+            or "gffend.com" in url.lower()
+            or "tgmeq.com" in url.lower()
+            or "usplaynet.com" in url.lower()
+            or "arrpar.com" in url.lower()
         ):
             return str(ws)
 
@@ -306,6 +310,16 @@ def find_game_websocket_url(cdp_url: str) -> str | None:
         url = str(t.get("url") or "")
         ws = t.get("webSocketDebuggerUrl")
         if ws and ("ae-live" in url or "popup-launch" in url):
+            return str(ws)
+
+    # Priority 4: Fallback to portal game page ONLY if no inner game client target exists
+    for t in targets:
+        url = str(t.get("url") or "")
+        ws = t.get("webSocketDebuggerUrl")
+        if ws and (
+            "page/player/game.jsp" in url.lower()
+            or "sexybcrt" in url.lower()
+        ):
             return str(ws)
 
     return None

@@ -96,6 +96,32 @@ def test_find_game_websocket_url() -> None:
         assert ws_url == "ws://127.0.0.1:9222/game_ws"
 
 
+def test_find_game_websocket_url_sv388_prioritizes_inner_iframe() -> None:
+    mock_targets = [
+        {
+            "id": "page-outer",
+            "type": "page",
+            "url": "https://www.svft388.com/page/player/game.jsp?pf=SEXYBCRT&game_code=SEXYBCRT&tableCode=",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/outer_page_ws",
+        },
+        {
+            "id": "iframe-inner",
+            "type": "iframe",
+            "url": "https://vcnh2k.gffend.com/player/webMain.jsp;jsessionid=ABC?dm=1&title=1&srw=1",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/inner_game_ws",
+        },
+    ]
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(mock_targets).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        ws_url = find_game_websocket_url("http://127.0.0.1:9222")
+        assert ws_url == "ws://127.0.0.1:9222/inner_game_ws"
+
+
 def test_live_auto_bettor_thread_lifecycle() -> None:
     bettor = LiveAutoBettor()
     assert not bettor.is_running
